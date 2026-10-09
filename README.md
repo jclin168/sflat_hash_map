@@ -261,6 +261,9 @@ with `-mno-avx2` (SSE2 path) and with ASan and UBSan.
 
 ## License
 
-The project code (`include/`, `tests/`, `bench/`) is original. You may use
-it freely. `thirdparty/` holds third-party code. Each keeps its original
-license (emhash, Boost).
+This project uses the GNU General Public License v3.0. The LICENSE file
+has the full text.
+
+The license covers `include/`, `tests/`, and `bench/`. `thirdparty/` holds
+third-party code. Each third-party item keeps its original license (emhash,
+Boost).
