@@ -153,6 +153,16 @@ The gain is modest (about 5 percent with 30 percent tombstones). At large
 scales the bottleneck is cache misses from table size, not probe length.
 No reorganization can fix that.
 
+### Batch find
+
+`find_batch(keys, n, out_found, out_values)` looks up `n` keys at once. It
+prefetches home buckets before the finds to overlap DRAM accesses. This
+helps when the table does not fit in cache.
+
+Measured speedup: 1.04x at 100M entries (80.8 ns to 77.9 ns per op). No
+gain at 10M. The CPU already overlaps misses well in a simple loop. The
+benefit grows with table size.
+
 ## Benchmark
 
 ### Test environment
