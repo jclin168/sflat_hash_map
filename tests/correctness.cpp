@@ -292,12 +292,85 @@ void test_sequential_keys() {
   std::printf("test_sequential_keys OK\n");
 }
 
+// Operations that run while an incremental migration is in progress.
+// Each case fills a map until a growth migration has just started, so most
+// elements are still in the old table.
+void test_during_migration() {
+  using Map = sflat::flat_hash_map<uint64_t, std::string>;
+  auto fill = [](Map& m) {
+    uint64_t k = 0;
+    size_t bc = 0;
+    for (;;) {
+      m.emplace(k, std::to_string(k));
+      ++k;
+      if (m.size() > 5000 && bc && m.bucket_count() != bc) return k;
+      bc = m.bucket_count();
+    }
+  };
+  auto all_present = [](const Map& m, uint64_t n) {
+    if (m.size() != n) return false;
+    for (uint64_t i = 0; i < n; ++i) {
+      auto it = m.find(i);
+      if (it == m.end() || it->second != std::to_string(i)) return false;
+    }
+    return true;
+  };
+  {  // copy construction and copy assignment
+    Map m;
+    const uint64_t n = fill(m);
+    Map c(m);
+    CHECK(all_present(c, n));
+    CHECK(static_cast<size_t>(std::distance(c.begin(), c.end())) == n);
+    Map m2;
+    fill(m2);
+    Map d;
+    d = m2;
+    CHECK(all_present(d, n));
+  }
+  {  // move construction and move assignment
+    Map m;
+    const uint64_t n = fill(m);
+    Map c(std::move(m));
+    CHECK(all_present(c, n));
+    Map m2;
+    fill(m2);
+    Map d;
+    d = std::move(m2);
+    CHECK(all_present(d, n));
+  }
+  {  // clear must drop the old table too
+    Map m;
+    const uint64_t n = fill(m);
+    m.clear();
+    CHECK(m.empty());
+    for (uint64_t i = 0; i < n; ++i) CHECK(m.find(i) == m.end());
+    CHECK(m.begin() == m.end());
+  }
+  {  // cbegin must see elements of the old table
+    Map m;
+    const uint64_t n = fill(m);
+    size_t cnt = 0;
+    for (auto it = m.cbegin(); it != m.cend(); ++it) ++cnt;
+    CHECK(cnt == n);
+  }
+  {  // insert_or_assign(key_type&&) must not duplicate old-table keys
+    Map m;
+    const uint64_t n = fill(m);
+    for (uint64_t i = 0; i < 100; ++i)
+      CHECK(!m.insert_or_assign(uint64_t(i), std::string("x")).second);
+    CHECK(m.size() == n);
+    for (uint64_t i = 0; i < 100; ++i) CHECK(m.at(i) == "x");
+  }
+  std::printf("test_during_migration OK\n");
+}
+
 int main() {
   test_api_surface();
   test_random_ops();
   test_string_keys();
   test_growth_factor();
   test_sequential_keys();
+  test_during_migration();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
   return 0;
 }

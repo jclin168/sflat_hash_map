@@ -355,101 +355,44 @@ class flat_hash_map {
       : flat_hash_map(il, bucket_count, hash, KeyEqual(), alloc) {}
 
   flat_hash_map(const flat_hash_map& other)
-      : hash_(other.hash_),
+      : max_load_factor_(other.max_load_factor_),
+        hash_(other.hash_),
         equal_(other.equal_),
-        max_load_factor_(other.max_load_factor_),
         slot_alloc_(slot_traits::select_on_container_copy_construction(
             other.slot_alloc_)),
         ctrl_alloc_(ctrl_traits::select_on_container_copy_construction(
             other.ctrl_alloc_)) {
-    if (other.cap_) {
-      rehash_to(other.cap_);
-      for (size_t i = 0; i < other.cap_; ++i) {
-        if (detail::IsFull(other.ctrl_[i])) {
-          const value_type* s = other.slot_at(i);
-          uint64_t h = hash_mixed(s->first);
-          size_t dst = find_empty(h);
-          construct_slot(dst, *s);
-          ctrl_[dst] = detail::H2(h);
-        }
-      }
-      size_ = other.size_;
-    }
+    copy_elements_from(other);
   }
 
   flat_hash_map(const flat_hash_map& other, const Allocator& alloc)
-      : hash_(other.hash_),
+      : max_load_factor_(other.max_load_factor_),
+        hash_(other.hash_),
         equal_(other.equal_),
-        max_load_factor_(other.max_load_factor_),
         slot_alloc_(alloc),
         ctrl_alloc_(alloc) {
-    if (other.cap_) {
-      rehash_to(other.cap_);
-      for (size_t i = 0; i < other.cap_; ++i) {
-        if (detail::IsFull(other.ctrl_[i])) {
-          const value_type* s = other.slot_at(i);
-          uint64_t h = hash_mixed(s->first);
-          size_t dst = find_empty(h);
-          construct_slot(dst, *s);
-          ctrl_[dst] = detail::H2(h);
-        }
-      }
-      size_ = other.size_;
-    }
+    copy_elements_from(other);
   }
 
   flat_hash_map(flat_hash_map&& other) noexcept
-      : slots_(other.slots_),
-        ctrl_(other.ctrl_),
-        overflow_(other.overflow_),
-        cap_(other.cap_),
-        size_(other.size_),
-        deleted_(other.deleted_),
-        max_load_factor_(other.max_load_factor_),
+      : max_load_factor_(other.max_load_factor_),
         hash_(std::move(other.hash_)),
         equal_(std::move(other.equal_)),
         slot_alloc_(std::move(other.slot_alloc_)),
         ctrl_alloc_(std::move(other.ctrl_alloc_)) {
-    other.slots_ = nullptr;
-    other.ctrl_ = nullptr;
-    other.overflow_ = nullptr;
-    other.cap_ = 0;
-    other.size_ = 0;
-    other.deleted_ = 0;
+    steal_storage(other);
   }
 
   flat_hash_map(flat_hash_map&& other, const Allocator& alloc)
-      : hash_(std::move(other.hash_)),
+      : max_load_factor_(other.max_load_factor_),
+        hash_(std::move(other.hash_)),
         equal_(std::move(other.equal_)),
-        max_load_factor_(other.max_load_factor_),
         slot_alloc_(alloc),
         ctrl_alloc_(alloc) {
     if (alloc == other.get_allocator()) {
-      slots_ = other.slots_;
-      ctrl_ = other.ctrl_;
-      overflow_ = other.overflow_;
-      cap_ = other.cap_;
-      size_ = other.size_;
-      deleted_ = other.deleted_;
-      other.slots_ = nullptr;
-      other.ctrl_ = nullptr;
-      other.overflow_ = nullptr;
-      other.cap_ = 0;
-      other.size_ = 0;
-      other.deleted_ = 0;
-    } else if (other.cap_) {
-      rehash_to(other.cap_);
-      for (size_t i = 0; i < other.cap_; ++i) {
-        if (detail::IsFull(other.ctrl_[i])) {
-          value_type* s = other.slot_at(i);
-          uint64_t h = hash_mixed(s->first);
-          size_t dst = find_empty(h);
-          construct_slot(dst, std::move(*s));
-          ctrl_[dst] = detail::H2(h);
-        }
-      }
-      size_ = other.size_;
-      other.clear();
+      steal_storage(other);
+    } else {
+      move_elements_from(other);
     }
   }
 
@@ -475,34 +418,10 @@ class flat_hash_map {
       if (slot_traits::propagate_on_container_move_assignment::value) {
         slot_alloc_ = std::move(other.slot_alloc_);
         ctrl_alloc_ = std::move(other.ctrl_alloc_);
-        slots_ = other.slots_;
-        ctrl_ = other.ctrl_;
-        overflow_ = other.overflow_;
-        cap_ = other.cap_;
-        size_ = other.size_;
-        deleted_ = other.deleted_;
-        other.slots_ = nullptr;
-        other.ctrl_ = nullptr;
-        other.overflow_ = nullptr;
-        other.cap_ = 0;
-        other.size_ = 0;
-        other.deleted_ = 0;
+        steal_storage(other);
       } else {
         // Allocators don't propagate: move elements one by one.
-        if (other.cap_) {
-          rehash_to(other.cap_);
-          for (size_t i = 0; i < other.cap_; ++i) {
-            if (detail::IsFull(other.ctrl_[i])) {
-              value_type* s = other.slot_at(i);
-              uint64_t h = hash_mixed(s->first);
-              size_t dst = find_empty(h);
-              construct_slot(dst, std::move(*s));
-              ctrl_[dst] = detail::H2(h);
-            }
-          }
-          size_ = other.size_;
-          other.clear();
-        }
+        move_elements_from(other);
       }
       hash_ = std::move(other.hash_);
       equal_ = std::move(other.equal_);
@@ -560,7 +479,7 @@ class flat_hash_map {
     const_cast<flat_hash_map*>(this)->finish_migration();
     return const_iterator(this, 0);
   }
-  const_iterator cbegin() const noexcept { return const_iterator(this, 0); }
+  const_iterator cbegin() const noexcept { return begin(); }
   iterator end() noexcept { return iterator(this, cap_); }
   const_iterator end() const noexcept { return const_iterator(this, cap_); }
   const_iterator cend() const noexcept { return const_iterator(this, cap_); }
@@ -573,6 +492,73 @@ class flat_hash_map {
 
   // ------------------------------------------------------------- core probes
  private:
+  // Visit every live element: the current table, then the part of the old
+  // table that is not migrated yet.
+  template <typename Self, typename F>
+  static void for_each_slot(Self& self, F&& f) {
+    for (size_t i = 0; i < self.cap_; ++i)
+      if (detail::IsFull(self.ctrl_[i])) f(self.slot_at(i));
+    for (size_t i = 0; i < self.old_cap_; ++i)
+      if (detail::IsFull(self.old_ctrl_[i]))
+        f(reinterpret_cast<typename std::conditional<
+              std::is_const<Self>::value, const value_type*, value_type*>::type>(
+            &self.old_slots_[i]));
+  }
+
+  // Place a value whose key is known to be absent (no duplicate check).
+  template <typename V>
+  void place_unique(V&& v) {
+    const uint64_t h = hash_mixed(v.first);
+    const size_t dst = find_empty(h);
+    construct_slot(dst, std::forward<V>(v));
+    ctrl_[dst] = detail::H2(h);
+  }
+
+  // Precondition: *this is empty and has no storage.
+  void copy_elements_from(const flat_hash_map& other) {
+    if (other.size_ == 0) return;
+    rehash_to(other.cap_);  // the current table of other holds all elements
+    for_each_slot(other, [this](const value_type* s) { place_unique(*s); });
+    size_ = other.size_;
+  }
+
+  // Precondition: *this is empty and has no storage.
+  void move_elements_from(flat_hash_map& other) {
+    if (other.size_ == 0) return;
+    rehash_to(other.cap_);
+    for_each_slot(other,
+                  [this](value_type* s) { place_unique(std::move(*s)); });
+    size_ = other.size_;
+    other.clear();
+  }
+
+  // Take all storage of other (including an ongoing migration).
+  // Precondition: *this has no storage.
+  void steal_storage(flat_hash_map& other) noexcept {
+    slots_ = other.slots_;
+    ctrl_ = other.ctrl_;
+    overflow_ = other.overflow_;
+    cap_ = other.cap_;
+    size_ = other.size_;
+    deleted_ = other.deleted_;
+    old_slots_ = other.old_slots_;
+    old_ctrl_ = other.old_ctrl_;
+    old_overflow_ = other.old_overflow_;
+    old_cap_ = other.old_cap_;
+    mig_pos_ = other.mig_pos_;
+    other.slots_ = nullptr;
+    other.ctrl_ = nullptr;
+    other.overflow_ = nullptr;
+    other.cap_ = 0;
+    other.size_ = 0;
+    other.deleted_ = 0;
+    other.old_slots_ = nullptr;
+    other.old_ctrl_ = nullptr;
+    other.old_overflow_ = nullptr;
+    other.old_cap_ = 0;
+    other.mig_pos_ = 0;
+  }
+
   value_type* slot_at(size_t i) noexcept {
     return reinterpret_cast<value_type*>(static_cast<void*>(&slots_[i]));
   }
@@ -756,7 +742,6 @@ class flat_hash_map {
   void migrate_step() {
     if (!is_migrating()) return;
     const size_t batch = 64;  // slots per step
-    const size_t new_ng = cap_ / kWidth;
     for (size_t i = 0; i < batch && mig_pos_ < old_cap_; ++i, ++mig_pos_) {
       if (!detail::IsFull(old_ctrl_[mig_pos_])) continue;
       migrate_one(mig_pos_);
@@ -888,6 +873,11 @@ class flat_hash_map {
   void clear() noexcept {
     for (size_t i = 0; i < cap_; ++i)
       if (detail::IsFull(ctrl_[i])) destroy_slot(i);
+    // Drop the old table of an ongoing migration too.
+    for (size_t i = 0; i < old_cap_; ++i)
+      if (detail::IsFull(old_ctrl_[i]))
+        reinterpret_cast<value_type*>(&old_slots_[i])->~value_type();
+    free_old();
     if (cap_) {
       std::memset(ctrl_, detail::kEmpty, cap_);
       std::memset(overflow_, 0, cap_ / kWidth);
@@ -1096,7 +1086,19 @@ class flat_hash_map {
     const Probe p = find_or_prepare(k, h);
     if (p.found) {
       slot_at(p.idx)->second = std::forward<M>(obj);
+      migrate_step();
       return {iterator(this, p.idx), false};
+    }
+    if (is_migrating()) {
+      const size_t oi = find_index_in(k, h, old_ctrl_, old_slots_, old_cap_,
+                                     old_overflow_, equal_);
+      if (oi != old_cap_) {
+        migrate_one(oi);
+        migrate_step();
+        const size_t ni = find_index(k, h);
+        slot_at(ni)->second = std::forward<M>(obj);
+        return {iterator(this, ni), false};
+      }
     }
     const bool reused = ctrl_[p.idx] == detail::kDeleted;
     construct_slot(p.idx, std::piecewise_construct,
@@ -1105,6 +1107,7 @@ class flat_hash_map {
     ctrl_[p.idx] = detail::H2(h);
     ++size_;
     if (reused) --deleted_;
+    migrate_step();
     return {iterator(this, p.idx), true};
   }
 

@@ -20,3 +20,6 @@ Makefile
 .idea/
 *.swp
 *~
+
+# Third-party benchmark dependencies (fetched locally)
+thirdparty/

@@ -1,5 +1,5 @@
 // Benchmark: sflat::flat_hash_map vs emhash8::HashMap vs
-// boost::unordered_flat_map.
+// boost::unordered_flat_map vs boost::unordered_map vs std::unordered_map.
 //
 // Each scenario runs in a forked child so the parent can read the child's
 // peak RSS (ru_maxrss) via wait4() for an honest per-map memory number.
@@ -237,7 +237,7 @@ int main(int argc, char** argv) {
   }
 
   std::printf("# maps: sflat (1.5x growth, mlf=0.875, AVX2 groups) vs "
-              "emhash8 1.7.4 (mlf=0.80) vs boost::unordered_flat_map vs "
+              "emhash8 (mlf=0.80) vs boost::unordered_flat_map vs "
               "boost::unordered_map vs std::unordered_map\n");
   std::printf("# cpu: x86-64, flags: -O3 -march=native -std=c++17\n");
   std::printf("# times are ns/op; rss values are child peak RSS in MiB\n\n");
@@ -304,15 +304,32 @@ int main(int argc, char** argv) {
         , (rss_absl - rss_base) * 1024.0 / n
 #endif
         );
-    // scenario B (no reserve)
-    run_child([] { run_B_sflat(g_n); });
-    run_child([] { run_B_emhash(g_n); });
-    run_child([] { run_B_boost(g_n); });
-    run_child([] { run_B_boost_node(g_n); });
-    run_child([] { run_B_std(g_n); });
+    // scenario B (no reserve). Peak RSS here includes the transient peak
+    // of growth (old table + new table alive at the same time).
+    const long rssB_sflat = run_child([] { run_B_sflat(g_n); });
+    const long rssB_emhash = run_child([] { run_B_emhash(g_n); });
+    const long rssB_boost = run_child([] { run_B_boost(g_n); });
+    const long rssB_boost_node = run_child([] { run_B_boost_node(g_n); });
+    const long rssB_std = run_child([] { run_B_std(g_n); });
 #ifdef HAS_ABSL
-    run_child([] { run_B_absl(g_n); });
+    const long rssB_absl = run_child([] { run_B_absl(g_n); });
 #endif
+    std::printf(
+        "  B growth peak bytes/entry (minus baseline): sflat=%.1f "
+        "emhash8=%.1f boost_flat=%.1f boost_node=%.1f std=%.1f"
+#ifdef HAS_ABSL
+        " absl=%.1f"
+#endif
+        "\n",
+        (rssB_sflat - rss_base) * 1024.0 / n,
+        (rssB_emhash - rss_base) * 1024.0 / n,
+        (rssB_boost - rss_base) * 1024.0 / n,
+        (rssB_boost_node - rss_base) * 1024.0 / n,
+        (rssB_std - rss_base) * 1024.0 / n
+#ifdef HAS_ABSL
+        , (rssB_absl - rss_base) * 1024.0 / n
+#endif
+        );
     std::printf("\n");
     std::fflush(stdout);
   }
