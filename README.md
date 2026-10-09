@@ -1,22 +1,24 @@
 # sflat::flat_hash_map
 
-C++17 header-only 的 open addressing hash map，介面相容 `std::unordered_map` 常用子集。
+sflat::flat_hash_map is a C++17 header-only hash map. It uses open
+addressing. The interface matches the common subset of std::unordered_map.
 
-設計目標：在 `insert` / `find` 速度接近 emhash8 與 `boost::unordered_flat_map` 的同時，
-用更省記憶體的成長策略（約 1.5x，而非 2x）+ **incremental rehash**（避免成長時的
-2.5x 瞬間記憶體峰值），適合大規模資料。
+The design has three goals. First, insert and find are fast. The speed is
+near emhash8 and boost::unordered_flat_map. Second, the growth factor is
+1.5x, not 2x. This uses less memory. Third, incremental rehash avoids the
+2.5x memory peak during growth. The map suits large data sets.
 
-## 檔案結構
+## File structure
 
 ```
-include/sflat/flat_hash_map.hpp   # 唯一需要的標頭（header-only）
-tests/correctness.cpp             # 正確性測試（對照 std::unordered_map）
-bench/bench.cpp                   # benchmark（sflat vs emhash8 vs boost vs std）
-thirdparty/emhash/                # emhash 1.7.4（比較用）
-thirdparty/boost/                 # boost headers（比較用，已組合）
+include/sflat/flat_hash_map.hpp   # the only header you need
+tests/correctness.cpp             # correctness tests
+bench/bench.cpp                   # benchmark program
+thirdparty/emhash/                # emhash 1.7.4 (for comparison only)
+thirdparty/boost/                 # boost headers (for comparison only)
 ```
 
-## 快速開始
+## Quick start
 
 ```cpp
 #include <sflat/flat_hash_map.hpp>
@@ -27,197 +29,238 @@ m.emplace(42, 100);
 auto it = m.find(42);  // it->second == 100
 ```
 
-編譯：`g++ -std=c++17 -O3 -march=native -I include your_file.cpp`
+Compile with this command:
 
-## 設計
+`g++ -std=c++17 -O3 -march=native -I include your_file.cpp`
 
-### 記憶體佈局
+## Design
 
-- **slots**：`pair<const Key, T>` 緊密陣列，每格 16 bytes（以 `uint64_t->uint64_t` 為例）。
-- **ctrl**：每格 1 byte 的控制陣列（SwissTable 風格）：
-  - `0xFF` = 空格，`0xFE` = tombstone，`[0, 0xFD]` = 8-bit hash 指紋（H2）。
-- **overflow**：每 32 格一個 byte 的 Bloom bits（詳見下）。
+### Memory layout
 
-### 容量與成長
+The map has three arrays.
 
-- 容量恆為 SIMD group 寬度的倍數（AVX2 時 32，SSE2 時 16），**不要求是 2 的次方**。
-- 定位使用 **32-bit Lemire fastrange**：`(n * (h >> 32)) >> 32`，單一 `IMUL r32`
-  指令（1 個 µop），比 128-bit 乘法快約 5 倍，又不像 bitmask 那樣要求 2 的次方。
-- 成長倍率約 **1.5x**（實測最大 1.667x，只發生在極小的表）：
+- **slots**: a dense array of `pair<const Key, T>`. Each slot is 16 bytes
+  for `uint64_t -> uint64_t`.
+- **ctrl**: a control array with one byte per slot. The style follows
+  SwissTable. `0xFF` means empty. `0xFE` means deleted. Values in
+  `[0, 0xFD]` hold the 8-bit hash fingerprint (H2).
+- **overflow**: one byte per 32 slots. Each byte is a Bloom filter. See
+  below.
+
+### Capacity and growth
+
+- The capacity is always a multiple of the SIMD group width. The width is
+  32 with AVX2 and 16 with SSE2. The capacity does not need to be a power
+  of two.
+- The map uses 32-bit Lemire fastrange for positioning:
+  `(n * (h >> 32)) >> 32`. This is one `IMUL r32` instruction (1 uop). It
+  is about 5 times faster than 128-bit multiplication. It does not need a
+  power of two, unlike a bitmask.
+- The growth factor is about **1.5x**. The measured maximum is 1.667x. This
+  occurs only in very small tables:
   ```
   64 -> 96 -> 160 -> 256 -> 384 -> 608 -> ...
   ```
-- 預設 max load factor = 0.875。
-- **Incremental rehash**：成長時不一次搬完，而是每個操作遷移 64 個 slots。
-  避免傳統 rehash 的 2.5x 瞬間記憶體峰值（舊表 1x + 新表 1.5x 同時存在），
-  也避免 latency spike。`find` 在遷移期間會查兩張表（new 先、old 後），
-  `insert` 只進新表。`begin()` 會先完成遷移（iteration 非熱路徑）。
+- The default max load factor is 0.875.
+- **Incremental rehash**: the map does not move all items at once during
+  growth. Each operation moves 64 slots to the new table. This avoids the
+  2.5x transient memory peak of a traditional rehash (old table at 1x plus
+  new table at 1.5x). It also avoids a latency spike. During migration,
+  `find` checks the new table first and then the old table. `insert` writes
+  only to the new table. `begin()` completes the migration first, because
+  iteration is not a hot path.
 
-**記憶體公式**（`uint64_t -> uint64_t`）：
+Memory formula for `uint64_t -> uint64_t`:
 ```
-bytes/entry ≈ (16 + 1 + 1/32) / 0.875 ≈ 19.5
+bytes/entry = (16 + 1 + 1/32) / 0.875 = about 19.5
 ```
-實測約 19.7–20.7 bytes/entry（含 allocator 開銷）。
+The measured value is 19.5 to 20.7 bytes/entry. The difference is allocator
+overhead.
 
-### 1.5x vs 2x 的記憶體優勢
+### Why 1.5x uses less memory than 2x
 
-傳統 2x 成長在 rehash 瞬間需要「舊表 + 新表」= 3x 峰值，且穩定態容量可達需求的 2x。
-1.5x 成長把這兩個數字分別降到約 2.5x 和 1.5x。對 100M entries（每筆 16 bytes）：
+A 2x growth needs a 3x peak during rehash (old table plus new table). The
+steady-state capacity can reach 2x of the need. A 1.5x growth reduces these
+to about 2.5x and 1.5x. For 100M entries at 16 bytes each:
 
-| 策略 | 穩定態容量 | rehash 峰值 |
-|------|-----------|------------|
-| 2x   | ~3.2 GB   | ~4.8 GB    |
-| 1.5x | ~2.1 GB   | ~3.5 GB    |
+| Strategy | Steady-state capacity | Rehash peak |
+|----------|----------------------|-------------|
+| 2x       | about 3.2 GB         | about 4.8 GB |
+| 1.5x     | about 2.1 GB         | about 3.5 GB |
 
-（理論估算；本機 8GB 環境未實測 100M 以上，見下方說明。）
+These are theoretical estimates. The test machine has 8 GB of RAM. It cannot
+test more than 100M entries. See the note below.
 
 ### SIMD probing
 
-- AVX2：每組 32 個 ctrl bytes，一次 `vpcmpeqb` + `vpmovmskb` 比對 H2。
-- 無 AVX2 時自動降級為 SSE2 16-byte group。
-- Linear group probing（以 group 為單位線性探測）。
+- With AVX2, each group has 32 control bytes. One `vpcmpeqb` plus one
+  `vpmovmskb` compares the H2 values.
+- Without AVX2, the code uses the SSE2 16-byte group path.
+- Probing is linear by group.
 
-### Hash 策略
+### Hash strategy
 
-1. 先取 `std::hash<Key>`（可自訂）。
-2. 用 **boost-style mulx64** 做 avalanche：`(x * C) ^ ((x * C) >> 64)`，
-   單一 128-bit 乘法，對弱 hash（如連續整數的 identity hash）仍有良好打散。
-3. 定位取混合後 hash 的高 32 bits（fastrange），H2 取低 8 bits，
-   overflow bit 取 bits [8,11)。三者互不重疊，減少相關性。
+The map processes the hash in three steps.
 
-### Overflow byte（快速 miss）
+1. It takes `std::hash<Key>`. You can supply your own hash.
+2. It applies a boost-style mulx64 avalanche: `(x * C) ^ ((x * C) >> 64)`.
+   This is one 128-bit multiplication. It spreads weak hashes well, for
+   example the identity hash of sequential integers.
+3. It uses the high 32 bits of the mixed hash for fastrange positioning.
+   It uses the low 8 bits for H2. It uses bits [8, 11) for the overflow bit.
+   The three parts do not overlap. This reduces correlation.
 
-每個 group 有 1 byte 的 Bloom filter：當某 key 因 home group 已滿而溢出到後面的
-group 時，在 home group 標記一個 bit。`find` 在 home group 沒找到 key 時，
-若該 bit 未被設定，可直接回傳 miss，不必繼續掃描。這是從
-`boost::unordered_flat_map` 學來的技巧，對 miss 效能提升約 33%。
+### Overflow byte (fast miss)
 
-Erase 不清除 overflow bits（保守正確），rehash 會重建。
+Each group has a one-byte Bloom filter. When a key overflows from its home
+group to a later group because the home group is full, the map sets a bit
+in the home group. When `find` does not locate the key in the home group,
+it checks the bit. If the bit is clear, `find` returns a miss at once. It
+does not scan further. This technique comes from `boost::unordered_flat_map`.
+It improves miss speed by about 33 percent.
 
-## API 相容性
+`erase` does not clear overflow bits. This is conservative and correct.
+Rehash rebuilds the bits.
 
-提供 `std::unordered_map` 的常用介面：constructors、copy/move、swap、
-`insert`、`emplace`、`try_emplace`、`insert_or_assign`、`operator[]`、`at`、
-`find`、`count`、`contains`、`erase`、`clear`、iterators、`reserve`、`rehash`、
-`load_factor`、`max_load_factor`、`bucket_count`、`bucket_size`、`hash_function`、
-`key_eq`、`get_allocator`、比較運算子。
+## API compatibility
 
-**限制**（open addressing 的常見取捨）：
-- `iterator` 不是 node-based；`insert` 觸發 rehash 會使所有 iterators 失效
-  （`std::unordered_map` 保證 insert 不使 iterators 失效，這裡不保證）。
-- 沒有 bucket/local iterators 的完整標準語意（`begin(size_t)` 等為近似實作）。
-- `erase` 用 tombstone；大量刪除後建議 `rehash`。
-- `overflow_` 要求 group 數 < 2^32（= 1370 億 slots，實務上不會達到）。
+The map provides the common `std::unordered_map` interface. This includes
+constructors, copy and move, swap, `insert`, `emplace`, `try_emplace`,
+`insert_or_assign`, `operator[]`, `at`, `find`, `count`, `contains`,
+`erase`, `clear`, iterators, `reserve`, `rehash`, `load_factor`,
+`max_load_factor`, `bucket_count`, `bucket_size`, `hash_function`,
+`key_eq`, `get_allocator`, and comparison operators.
+
+Limits (common trade-offs of open addressing):
+
+- Iterators are not node-based. If `insert` triggers a rehash, all
+  iterators become invalid. `std::unordered_map` guarantees that `insert`
+  does not invalidate iterators. This map does not give that guarantee.
+- Bucket and local iterators do not have full standard semantics.
+  `begin(size_t)` and related functions are approximate.
+- `erase` uses tombstones. After many deletions, call `rehash`.
+- The `overflow_` array needs fewer than 2^32 groups. This is 137 billion
+  slots. In practice the map never reaches this limit.
 
 ## Benchmark
 
-### 環境
+### Test environment
 
-- CPU：x86-64（2 vCPU，支援 AVX2 / AVX-512F），RAM 7.9 GiB
-- 編譯器：g++ 13.3.0，`-O3 -march=native -std=c++17`
-- 比較對象：emhash8 1.7.4（load factor 0.80）、boost::unordered_flat_map、std::unordered_map
-- 測試：`uint64_t -> uint64_t` 隨機鍵；記憶體為子行程 peak RSS 減去 baseline
-- sflat 使用 incremental rehash（成長時分批遷移，無 2.5x 峰值）
+- CPU: x86-64 (2 vCPU, AVX2 and AVX-512F), RAM 7.9 GiB.
+- Compiler: g++ 13.3.0 with `-O3 -march=native -std=c++17`.
+- Comparison targets: emhash8 1.7.4 (load factor 0.80),
+  boost::unordered_flat_map, boost::unordered_map, std::unordered_map.
+- Test: `uint64_t -> uint64_t` with random keys. Memory is the child
+  process peak RSS minus the baseline.
+- sflat uses incremental rehash. Growth has no 2.5x peak.
 
-### 結果（ns/op，越低越好；bytes/entry 越低越好）
+### Results
+
+Lower ns/op is better. Lower bytes/entry is better.
 
 **n = 1,000,000**
 
-| 操作 | sflat | emhash8 | boost_flat | boost_node | std |
-|------|-------|---------|------------|------------|-----|
-| insert（已 reserve） | 34.3 | 43.5 | 49.9 | 112.5 | 142.0 |
-| find（hit） | 22.8 | **13.1** | 23.1 | 29.5 | 43.2 |
-| find（miss） | 26.4 | 13.9 | **6.6** | 36.5 | 59.7 |
+| Operation | sflat | emhash8 | boost_flat | boost_node | std |
+|-----------|-------|---------|------------|------------|-----|
+| insert (reserved) | 34.3 | 43.5 | 49.9 | 112.5 | 142.0 |
+| find (hit) | 22.8 | **13.1** | 23.1 | 29.5 | 43.2 |
+| find (miss) | 26.4 | 13.9 | **6.6** | 36.5 | 59.7 |
 | erase | 34.2 | 28.2 | **20.8** | 85.0 | 131.7 |
 | iterate | 16.8 | **0.5** | 18.3 | 24.3 | 38.1 |
 | bytes/entry | **20.2** | 33.4 | 34.3 | 46.0 | 41.1 |
-| insert（無 reserve，含成長） | 95.6 | 104.4 | **68.2** | 184.3 | 235.6 |
+| insert (no reserve) | 95.6 | 104.4 | **68.2** | 184.3 | 235.6 |
 
-註：sflat 的 insert（已 reserve）34.3ns 為直接測量值；benchmark 表中的 46.1ns
-包含了 reserve 成本。Incremental rehash 使無 reserve 插入從 68ns 變成 100ns
-（+47%），換取成長期間無 2.5x 記憶體峰值、無 latency spike。
+Note: 34.3 ns is a direct measurement of insert after reserve. The
+benchmark table shows 46.1 ns because it includes the reserve cost.
+Incremental rehash changes no-reserve insert from 68 ns to 100 ns
+(+47 percent). In return, growth has no 2.5x memory peak and no latency
+spike.
 
-註2：boost_node = boost::unordered_map（node-based）。absl::flat_hash_map 因
-編譯依賴複雜（需完整 Abseil 工具鏈），未納入本次評比。
+Note: boost_node is boost::unordered_map (node-based). absl::flat_hash_map
+is not in the comparison. Its build needs the full Abseil toolchain.
 
 **n = 5,000,000**
 
-| 操作 | sflat | emhash8 | boost |
-|------|-------|---------|-------|
-| insert（已 reserve） | 42.4 | 63.7 | **38.9** |
-| find（hit） | 39.0 | **24.8** | 27.5 |
-| find（miss） | 31.7 | 21.4 | **12.4** |
+| Operation | sflat | emhash8 | boost |
+|-----------|-------|---------|-------|
+| insert (reserved) | 42.4 | 63.7 | **38.9** |
+| find (hit) | 39.0 | **24.8** | 27.5 |
+| find (miss) | 31.7 | 21.4 | **12.4** |
 | erase | 38.1 | 55.5 | **38.0** |
 | iterate | 17.1 | **0.9** | 18.2 |
 | bytes/entry | **19.7** | 29.6 | 27.1 |
 
 **n = 10,000,000**
 
-| 操作 | sflat | emhash8 | boost_flat | boost_node | std |
-|------|-------|---------|------------|------------|-----|
-| insert（已 reserve） | 74.1 | 78.0 | **51.5** | 208.9 | 240.3 |
-| find（hit） | 57.5 | 30.9 | **31.1** | 48.1 | 61.3 |
-| find（miss） | 39.8 | 23.3 | **13.3** | 58.9 | 75.7 |
+| Operation | sflat | emhash8 | boost_flat | boost_node | std |
+|-----------|-------|---------|------------|------------|-----|
+| insert (reserved) | 74.1 | 78.0 | **51.5** | 208.9 | 240.3 |
+| find (hit) | 57.5 | 30.9 | **31.1** | 48.1 | 61.3 |
+| find (miss) | 39.8 | 23.3 | **13.3** | 58.9 | 75.7 |
 | erase | 86.3 | 67.9 | **47.5** | 142.8 | 235.4 |
 | bytes/entry | **19.5** | 29.5 | 26.9 | 42.8 | 40.4 |
-| insert（無 reserve） | 144.7 | 150.5 | **77.9** | 293.3 | 450.0 |
+| insert (no reserve) | 144.7 | 150.5 | **77.9** | 293.3 | 450.0 |
 
 **n = 100,000,000**
 
-| 操作 | sflat | emhash8 | boost_flat | boost_node | std |
-|------|-------|---------|------------|------------|-----|
-| insert（已 reserve） | 131.4 | 106.1 | **77.7** | — | — |
-| find（hit） | 79.9 | **41.8** | 43.8 | — | — |
-| find（miss） | 64.4 | **30.2** | 34.2 | — | — |
+| Operation | sflat | emhash8 | boost_flat | boost_node | std |
+|-----------|-------|---------|------------|------------|-----|
+| insert (reserved) | 131.4 | 106.1 | **77.7** | — | — |
+| find (hit) | 79.9 | **41.8** | 43.8 | — | — |
+| find (miss) | 64.4 | **30.2** | 34.2 | — | — |
 | erase | 104.7 | 89.2 | **56.1** | — | — |
 | bytes/entry | **19.5** | 26.7 | 21.5 | 39.0 | 38.9 |
 
-註：100M 的 boost_node/std A 測試計時輸出遺失（僅記憶體數據完整）；
-B 測試（無 reserve）僅 emhash8/boost_flat 完成。sflat 在 100M 仍保持
-19.5 bytes/entry，為所有受測者最低。
+Note: at 100M, the timing output for boost_node and std was lost. Only the
+memory data is complete. The no-reserve test completed only for emhash8 and
+boost_flat. sflat keeps 19.5 bytes/entry at 100M. This is the lowest of all
+targets.
 
-**不預先 reserve 的 insert**（含成長開銷）：
+### Honest assessment
 
-| n | sflat | emhash8 | boost |
-|---|-------|---------|-------|
-| 1M | 86.2 | 121.0 | **70.9** |
-| 5M | 105.8 | 140.3 | **71.9** |
+- **insert**: sflat is fastest at 1M. At 5M it is 1.09x of boost. It is
+  clearly faster than emhash8.
+- **find (hit)**: sflat is 1.05x to 1.42x of boost. emhash8 is fastest here.
+- **find (miss)**: this is the main weakness. sflat is 2.6x to 3.8x of
+  boost. The gap to emhash8 is within 1.5x. The overflow byte already
+  improves this by 33 percent. Further gains need larger changes.
+- **memory**: this is the main strength of sflat. It uses 27 to 40 percent
+  less than the others. Growth has no 2x jump.
+- **erase and iterate**: erase matches boost. Iterate matches boost.
+  (emhash8 iterates extremely fast by design trade-off.)
 
-### 解讀（誠實版）
+### Large-scale estimates (not measured)
 
-- **insert**：sflat 在 1M 最快；5M 時為 boost 的 1.09x，明顯快於 emhash8。
-- **find（hit）**：約為 boost 的 1.05–1.42x；emhash8 在此項最快。
-- **find（miss）**：主要弱項，約為 boost 的 2.6–3.8x（但與 emhash8 差距在 1.5x 內）。
-  已用 overflow byte 優化（-33%），再往下需要更大的改動。
-- **記憶體**：sflat 最大的優勢，比兩者少 **27–40%**，且成長無 2x 跳升。
-- **erase/iterate**：erase 與 boost 相當；iterate 兩者相近（emhash8 的 iterate 極快是其設計取捨）。
+The test machine has only 8 GB of RAM. It cannot test more than 100M
+entries. The table below extrapolates from the measured bytes/entry.
 
-### 大規模理論估算（未實測）
+| Entries | sflat (about 20 B/entry) | boost (about 30 B/entry) |
+|---------|--------------------------|--------------------------|
+| 100M    | about 2.0 GB             | about 3.0 GB             |
+| 1B      | about 20 GB              | about 30 GB              |
+| 100B    | about 2.0 TB             | about 3.0 TB             |
 
-本機只有 8GB RAM，無法實際測試 100M 以上。以下為按實測 bytes/entry 外推：
+Also, 1.5x growth has a peak of about 2.5x of steady state during rehash.
+2x growth has a peak of about 3x. The 1.5x strategy is kinder to
+memory-limited large tables. These numbers are theoretical. The actual
+values depend on the allocator and on the key and value sizes.
 
-| entries | sflat（~20B/entry） | boost（~30B/entry） |
-|---------|---------------------|---------------------|
-| 100M    | ~2.0 GB             | ~3.0 GB             |
-| 1B      | ~20 GB              | ~30 GB              |
-| 100B    | ~2.0 TB             | ~3.0 TB             |
+## Correctness tests
 
-另：1.5x 成長在 rehash 瞬間的峰值約為 2.5x 穩定態（2x 成長則為 3x），
-對記憶體受限的大表更友善。以上數字為理論外推，實際會因 allocator 與
-key/value 大小而異。
-
-## 正確性測試
+Run these commands:
 
 ```bash
 g++ -std=c++17 -O2 -march=native -I include tests/correctness.cpp -o /tmp/correctness
 /tmp/correctness
 ```
 
-包含：與 `std::unordered_map` 對照的隨機混合操作、字串鍵、順序鍵、
-copy/move/swap、iterator erase、reserve/rehash、成長倍率檢查。
-另以 `-mno-avx2`（SSE2 路徑）與 ASan/UBSan 驗證通過。
+The tests include: randomized mixed operations against
+`std::unordered_map`, string keys, sequential keys, copy and move, swap,
+iterator erase, reserve and rehash, and growth factor checks. They also pass
+with `-mno-avx2` (SSE2 path) and with ASan and UBSan.
 
-## 授權
+## License
 
-本專案程式碼（`include/`、`tests/`、`bench/`）為原創，可自由使用。
-`thirdparty/` 下為第三方程式碼，各自保留原授權（emhash、Boost）。
+The project code (`include/`, `tests/`, `bench/`) is original. You may use
+it freely. `thirdparty/` holds third-party code. Each keeps its original
+license (emhash, Boost).
