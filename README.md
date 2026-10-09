@@ -142,6 +142,17 @@ Limits (common trade-offs of open addressing):
 - The `overflow_` array needs fewer than 2^32 groups. This is 137 billion
   slots. In practice the map never reaches this limit.
 
+### Steady-state optimization
+
+When the map will have no more inserts or erases, call `optimize()`. It
+rebuilds the table, removes tombstones, and shrinks to the minimal capacity.
+This shortens probe chains and speeds up `find`. `shrink_to_fit()` does the
+same resize without the semantic hint.
+
+The gain is modest (about 5 percent with 30 percent tombstones). At large
+scales the bottleneck is cache misses from table size, not probe length.
+No reorganization can fix that.
+
 ## Benchmark
 
 ### Test environment
