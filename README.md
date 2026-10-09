@@ -91,8 +91,7 @@ to about 2.5x and 1.5x. For 100M entries at 16 bytes each:
 
 These are theoretical estimates. They are the worst case for each strategy.
 The actual peak also depends on where `n` falls relative to the growth
-steps. The test machine has 8 GB of RAM. It cannot
-test more than 100M entries. See the note below.
+steps. See the note below.
 
 ### SIMD probing
 
@@ -175,93 +174,94 @@ benefit grows with table size.
 
 ### Test environment
 
-- CPU: x86-64 (2 vCPU, AVX2 and AVX-512F), RAM 7.9 GiB.
+- CPU: Intel Xeon @ 2.10 GHz (4 vCPU, AVX2 and AVX-512), RAM 15 GiB.
 - Compiler: g++ 13.3.0 with `-O3 -march=native -std=c++17`.
-- Comparison targets: emhash8 1.7.4 (load factor 0.80),
-  boost::unordered_flat_map, boost::unordered_map, std::unordered_map.
-- Test: `uint64_t -> uint64_t` with random keys. Memory is the child
-  process peak RSS minus the baseline.
-- sflat uses incremental rehash. Growth has no 2.5x peak.
+- Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
+  boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
+  std::unordered_map (libstdc++ 13).
+- Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
+  child process. Memory is the child peak RSS minus the baseline (key and
+  value arrays only).
+- One run per size. Expect about 10 percent noise between runs.
 
 ### Results
 
-Lower ns/op is better. Lower bytes/entry is better.
+Lower ns/op is better. Lower bytes/entry is better. **Bold** is the best
+value in the row.
+
+"insert (reserved)" includes the `reserve(n)` call. "growth peak" is the
+peak RSS of the no-reserve test. It includes the time when the old and the
+new table are both alive.
 
 **n = 1,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | std |
 |-----------|-------|---------|------------|------------|-----|
-| insert (reserved) | 34.3 | 43.5 | 49.9 | 112.5 | 142.0 |
-| find (hit) | 22.8 | **13.1** | 23.1 | 29.5 | 43.2 |
-| find (miss) | 26.4 | 13.9 | **6.6** | 36.5 | 59.7 |
-| erase | 34.2 | 28.2 | **20.8** | 85.0 | 131.7 |
-| iterate | 16.8 | **0.5** | 18.3 | 24.3 | 38.1 |
-| bytes/entry | **20.2** | 33.4 | 34.3 | 46.0 | 41.1 |
-| insert (no reserve) | 95.6 | 104.4 | **68.2** | 184.3 | 235.6 |
-
-Note: 34.3 ns is a direct measurement of insert after reserve. The
-benchmark table shows 46.1 ns because it includes the reserve cost.
-Incremental rehash changes no-reserve insert from 68 ns to 100 ns
-(+47 percent). In return, growth has no 2.5x memory peak and no latency
-spike.
-
-Note: boost_node is boost::unordered_map (node-based). absl::flat_hash_map
-is not in the comparison. Its build needs the full Abseil toolchain.
-
-**n = 5,000,000**
-
-| Operation | sflat | emhash8 | boost |
-|-----------|-------|---------|-------|
-| insert (reserved) | 42.4 | 63.7 | **38.9** |
-| find (hit) | 39.0 | **24.8** | 27.5 |
-| find (miss) | 31.7 | 21.4 | **12.4** |
-| erase | 38.1 | 55.5 | **38.0** |
-| iterate | 17.1 | **0.9** | 18.2 |
-| bytes/entry | **19.7** | 29.6 | 27.1 |
+| insert (reserved) | 34.6 | 35.6 | **25.7** | 81.6 | 100.3 |
+| find (hit) | 20.3 | 9.4 | **9.2** | 18.6 | 24.7 |
+| find (miss) | 17.1 | 13.0 | **5.2** | 20.9 | 34.1 |
+| erase | 20.8 | 22.5 | **11.6** | 46.4 | 66.8 |
+| iterate | 10.8 | **0.6** | 11.0 | 14.2 | 24.0 |
+| insert (no reserve) | 68.0 | 86.2 | **49.8** | 136.4 | 164.8 |
+| bytes/entry (steady) | **20.7** | 34.1 | 34.8 | 46.7 | 41.9 |
+| bytes/entry (growth peak) | 39.1 | **36.1** | 51.1 | 46.7 | 45.2 |
 
 **n = 10,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | std |
 |-----------|-------|---------|------------|------------|-----|
-| insert (reserved) | 74.1 | 78.0 | **51.5** | 208.9 | 240.3 |
-| find (hit) | 57.5 | 30.9 | **31.1** | 48.1 | 61.3 |
-| find (miss) | 39.8 | 23.3 | **13.3** | 58.9 | 75.7 |
-| erase | 86.3 | 67.9 | **47.5** | 142.8 | 235.4 |
-| bytes/entry | **19.5** | 29.5 | 26.9 | 42.8 | 40.4 |
-| insert (no reserve) | 144.7 | 150.5 | **77.9** | 293.3 | 450.0 |
+| insert (reserved) | 107.9 | 92.8 | **35.9** | 224.1 | 245.8 |
+| find (hit) | 36.7 | **20.6** | 27.0 | 39.6 | 48.6 |
+| find (miss) | 27.8 | 21.4 | **11.4** | 50.2 | 66.2 |
+| erase | 50.6 | 52.7 | **37.3** | 110.2 | 189.0 |
+| iterate | 12.4 | **1.7** | 12.7 | 30.6 | 76.2 |
+| insert (no reserve) | 211.9 | 122.8 | **92.3** | 342.5 | 452.4 |
+| bytes/entry (steady) | **19.6** | 29.5 | 27.0 | 42.8 | 40.4 |
+| bytes/entry (growth peak) | 42.5 | **29.6** | 40.3 | 42.8 | 41.9 |
 
 **n = 100,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | std |
 |-----------|-------|---------|------------|------------|-----|
-| insert (reserved) | 131.4 | 106.1 | **77.7** | — | — |
-| find (hit) | 79.9 | **41.8** | 43.8 | — | — |
-| find (miss) | 64.4 | **30.2** | 34.2 | — | — |
-| erase | 104.7 | 89.2 | **56.1** | — | — |
-| bytes/entry | **19.5** | 26.7 | 21.5 | 39.0 | 38.9 |
-
-Note: at 100M, the timing output for boost_node and std was lost. Only the
-memory data is complete. The no-reserve test completed only for emhash8 and
-boost_flat. sflat keeps 19.5 bytes/entry at 100M. This is the lowest of all
-targets.
+| insert (reserved) | 138.2 | 120.1 | **55.3** | 318.2 | 353.8 |
+| find (hit) | 71.7 | **35.0** | 43.2 | 56.3 | 66.5 |
+| find (miss) | 43.2 | 34.8 | **22.4** | 75.4 | 81.4 |
+| erase | 92.8 | 79.1 | **54.2** | 158.1 | 265.9 |
+| iterate | 11.8 | **1.8** | 11.8 | 43.0 | 108.2 |
+| insert (no reserve) | 236.5 | 167.0 | **108.5** | 432.2 | 611.6 |
+| bytes/entry (steady) | **19.5** | 26.7 | 21.5 | 40.6 | 40.1 |
+| bytes/entry (growth peak) | 48.7 | **26.7** | 32.2 | 40.6 | 40.1 |
 
 ### Honest assessment
 
-- **insert**: sflat is fastest at 1M. At 5M it is 1.09x of boost. It is
-  clearly faster than emhash8.
-- **find (hit)**: sflat is 1.05x to 1.42x of boost. emhash8 is fastest here.
-- **find (miss)**: this is the main weakness. sflat is 2.6x to 3.8x of
-  boost. The gap to emhash8 is within 1.5x. The overflow byte already
-  improves this by 33 percent. Further gains need larger changes.
-- **memory**: this is the main strength of sflat. It uses 27 to 40 percent
-  less than the others. Growth has no 2x jump.
-- **erase and iterate**: erase matches boost. Iterate matches boost.
-  (emhash8 iterates extremely fast by design trade-off.)
+- **memory (steady state)**: this is the main strength of sflat. It uses
+  the least memory at all sizes: 9 to 41 percent less than boost_flat, 27
+  to 39 percent less than emhash8, and about half of the node-based maps.
+- **memory (growth peak)**: sflat has the **highest** peak at 10M and 100M.
+  Incremental rehash keeps the old and the new table alive together for
+  many operations. Thus it does not decrease the peak. If the peak is
+  important, call `reserve(n)` first.
+- **insert (reserved)**: boost_flat is 1.3x to 3x faster. After
+  `reserve(n)`, sflat fills the table to its 0.875 load limit. boost_flat
+  and emhash8 round the capacity up to a power of two. Their final load is
+  0.6 to 0.8. Thus sflat probes longer chains. This is the cost of
+  the smaller memory.
+- **find (hit)**: sflat is 1.8x to 2.2x slower than the best (emhash8 or
+  boost_flat). It is faster than std::unordered_map at 1M and 10M.
+- **find (miss)**: sflat is 1.9x to 3.3x slower than boost_flat. The same
+  high load causes this. Many home groups are full, so the overflow bits
+  are often set.
+- **erase**: within 1.8x of boost_flat. Faster than the node-based maps.
+- **iterate**: equal to boost_flat. emhash8 is much faster because it keeps
+  the values in a dense array.
+- **flat versus node maps**: all three flat maps are faster than
+  boost::unordered_map and std::unordered_map in most operations. The only
+  exceptions are find (hit) at 100M and at 1M, where the node maps are
+  equal to or slightly faster than sflat.
 
 ### Large-scale estimates (not measured)
 
-The test machine has only 8 GB of RAM. It cannot test more than 100M
-entries. The table below extrapolates from the measured bytes/entry.
+The table below extrapolates from the measured steady-state bytes/entry.
 
 | Entries | sflat (about 20 B/entry) | boost (about 30 B/entry) |
 |---------|--------------------------|--------------------------|
