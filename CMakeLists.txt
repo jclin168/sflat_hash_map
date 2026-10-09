@@ -27,15 +27,21 @@ if(SFLAT_BUILD_TESTS)
 endif()
 
 if(SFLAT_BUILD_BENCH)
-  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/boost/include
-     AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/emhash)
+  # emhash: thirdparty/emhash (old flat layout) or thirdparty/emhash/include
+  # (current upstream layout). Boost: thirdparty/boost/include or system.
+  find_path(SFLAT_EMHASH_DIR emhash/hash_table8.hpp
+    PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/emhash
+          ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/emhash/include
+    NO_DEFAULT_PATH)
+  find_path(SFLAT_BOOST_DIR boost/unordered/unordered_flat_map.hpp
+    PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/boost/include)
+  if(SFLAT_EMHASH_DIR AND SFLAT_BOOST_DIR)
     add_executable(bench bench/bench.cpp)
     target_link_libraries(bench PRIVATE sflat)
-    target_include_directories(bench PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/boost/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/emhash)
+    target_include_directories(bench PRIVATE ${SFLAT_BOOST_DIR}
+                                             ${SFLAT_EMHASH_DIR})
     target_compile_options(bench PRIVATE -O3 -Wall)
   else()
-    message(STATUS "thirdparty/ not present, skipping bench target")
+    message(STATUS "emhash or boost not found, skipping bench target")
   endif()
 endif()

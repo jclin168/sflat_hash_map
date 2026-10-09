@@ -3,10 +3,10 @@
 sflat::flat_hash_map is a C++17 header-only hash map. It uses open
 addressing. The interface matches the common subset of std::unordered_map.
 
-The design has three goals. First, insert and find are fast. The speed is
-near emhash8 and boost::unordered_flat_map. Second, the growth factor is
-1.5x, not 2x. This uses less memory. Third, incremental rehash avoids the
-2.5x memory peak during growth. The map suits large data sets.
+The design has three goals. First, insert and find are fast. Second, the
+growth factor is 1.5x, not 2x. This uses less memory. Third, incremental
+rehash avoids a latency spike during growth. The map suits large data sets
+where steady-state memory is important.
 
 ## File structure
 
@@ -14,8 +14,8 @@ near emhash8 and boost::unordered_flat_map. Second, the growth factor is
 include/sflat/flat_hash_map.hpp   # the only header you need
 tests/correctness.cpp             # correctness tests
 bench/bench.cpp                   # benchmark program
-thirdparty/emhash/                # emhash 1.7.4 (for comparison only)
-thirdparty/boost/                 # boost headers (for comparison only)
+thirdparty/emhash/                # emhash (for comparison only, not in git)
+thirdparty/boost/                 # boost headers (optional, else system boost)
 ```
 
 ## Quick start
@@ -63,9 +63,10 @@ The map has three arrays.
   ```
 - The default max load factor is 0.875.
 - **Incremental rehash**: the map does not move all items at once during
-  growth. Each operation moves 64 slots to the new table. This avoids the
-  2.5x transient memory peak of a traditional rehash (old table at 1x plus
-  new table at 1.5x). It also avoids a latency spike. During migration,
+  growth. Each operation moves 64 slots to the new table. This avoids a
+  latency spike. It does **not** decrease the transient memory peak: the old
+  table (1x) and the new table (1.5x) are both alive until the migration
+  ends. The measured growth peak is in the benchmark below. During migration,
   `find` checks the new table first and then the old table. `insert` writes
   only to the new table. `begin()` completes the migration first, because
   iteration is not a hot path.
@@ -88,7 +89,9 @@ to about 2.5x and 1.5x. For 100M entries at 16 bytes each:
 | 2x       | about 3.2 GB         | about 4.8 GB |
 | 1.5x     | about 2.1 GB         | about 3.5 GB |
 
-These are theoretical estimates. The test machine has 8 GB of RAM. It cannot
+These are theoretical estimates. They are the worst case for each strategy.
+The actual peak also depends on where `n` falls relative to the growth
+steps. The test machine has 8 GB of RAM. It cannot
 test more than 100M entries. See the note below.
 
 ### SIMD probing
@@ -139,6 +142,11 @@ Limits (common trade-offs of open addressing):
 - Bucket and local iterators do not have full standard semantics.
   `begin(size_t)` and related functions are approximate.
 - `erase` uses tombstones. After many deletions, call `rehash`.
+- During a migration, some `const` functions (`find`, `count`, `contains`,
+  `at`, `begin`, `cbegin`) change internal state. They move items to the
+  new table. Thus concurrent reads from many threads are not safe while a
+  migration is in progress. Call `finish_migration()` (or `begin()`) from
+  one thread before you share the map for reads.
 - The `overflow_` array needs fewer than 2^32 groups. This is 137 billion
   slots. In practice the map never reaches this limit.
 
