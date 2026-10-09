@@ -1199,6 +1199,48 @@ class flat_hash_map {
     return find(key) == end() ? 0 : 1;
   }
 
+  // Batch find for large tables. Processes keys in groups, prefetching home
+  // buckets before the finds to overlap DRAM accesses. Faster than calling
+  // find() in a loop when the table does not fit in cache.
+  //
+  // keys: array of n keys to look up.
+  // out_found: array of n bools, set to true if key was found.
+  // out_values: array of n mapped_type, set to the value if found
+  //   (undefined if not found). May be nullptr.
+  void find_batch(const key_type* keys, size_t n, bool* out_found,
+                  mapped_type* out_values = nullptr) const {
+    if (cap_ == 0) {
+      for (size_t i = 0; i < n; ++i) out_found[i] = false;
+      return;
+    }
+    // Finish migration first; batch find does not support migrating tables.
+    if (is_migrating()) const_cast<flat_hash_map*>(this)->finish_migration();
+    const size_t ng = cap_ / kWidth;
+    constexpr size_t B = 64;
+    for (size_t base = 0; base < n; base += B) {
+      const size_t cnt = (base + B <= n) ? B : (n - base);
+      uint64_t hashes[B];
+      // Phase 1: compute hashes and prefetch home buckets.
+      for (size_t i = 0; i < cnt; ++i) {
+        const uint64_t h = hash_mixed(keys[base + i]);
+        hashes[i] = h;
+        const size_t home = detail::Fastrange(h, ng);
+        __builtin_prefetch(ctrl_ + home * kWidth, 0, 0);
+        __builtin_prefetch(slots_ + home * kWidth, 0, 0);
+      }
+      // Phase 2: do the finds (data is now in flight from DRAM).
+      for (size_t i = 0; i < cnt; ++i) {
+        const size_t idx = find_index(keys[base + i], hashes[i]);
+        const bool found = (idx != cap_);
+        out_found[base + i] = found;
+        if (found && out_values) {
+          out_values[base + i] =
+              reinterpret_cast<const value_type*>(&slots_[idx])->second;
+        }
+      }
+    }
+  }
+
   bool contains(const key_type& key) const {  // C++20 convenience
     return find(key) != end();
   }
