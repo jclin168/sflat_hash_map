@@ -1260,6 +1260,25 @@ class flat_hash_map {
 
   void reserve(size_type n) { rehash(n); }
 
+  // Optimize for steady-state finds: rebuild the table to remove tombstones.
+  // Call this when no more inserts or erases are expected. This is equivalent
+  // to rehash(capacity()) but also shrinks if the table is oversized.
+  void optimize() {
+    if (is_migrating()) finish_migration();
+    if (size_ == 0) {
+      clear();
+      return;
+    }
+    // Rebuild at the minimal capacity that fits, removing tombstones.
+    // This re-lays out elements and shortens probe chains.
+    rehash_to(min_cap_for(size_));
+  }
+
+  void shrink_to_fit() {
+    if (is_migrating()) finish_migration();
+    rehash_to(min_cap_for(size_));
+  }
+
   // ----------------------------------------------------------------- buckets
   size_type bucket_count() const noexcept { return cap_; }
 
