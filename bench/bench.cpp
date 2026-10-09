@@ -15,8 +15,13 @@
 #include <emhash/hash_table8.hpp>
 
 #include <boost/unordered/unordered_flat_map.hpp>
+#include <boost/unordered/unordered_map.hpp>
 
 #include <unordered_map>
+
+#ifdef HAS_ABSL
+#include <absl/container/flat_hash_map.h>
+#endif
 
 #include <chrono>
 #include <cstdint>
@@ -199,16 +204,28 @@ long run_child(void (*fn)(void)) {
 using SflatMap = sflat::flat_hash_map<uint64_t, uint64_t>;
 using EmhashMap = emhash8::HashMap<uint64_t, uint64_t>;
 using BoostMap = boost::unordered_flat_map<uint64_t, uint64_t>;
+using BoostNodeMap = boost::unordered_map<uint64_t, uint64_t>;
 using StdMap = std::unordered_map<uint64_t, uint64_t>;
+#ifdef HAS_ABSL
+using AbslMap = absl::flat_hash_map<uint64_t, uint64_t>;
+#endif
 
 void run_A_sflat(size_t n) { child_A<SflatMap>("sflat", n); }
 void run_A_emhash(size_t n) { child_A<EmhashMap>("emhash8", n); }
 void run_A_boost(size_t n) { child_A<BoostMap>("boost_flat", n); }
+void run_A_boost_node(size_t n) { child_A<BoostNodeMap>("boost_node", n); }
 void run_A_std(size_t n) { child_A<StdMap>("std_unordered", n); }
+#ifdef HAS_ABSL
+void run_A_absl(size_t n) { child_A<AbslMap>("absl_flat", n); }
+#endif
 void run_B_sflat(size_t n) { child_B<SflatMap>("sflat", n); }
 void run_B_emhash(size_t n) { child_B<EmhashMap>("emhash8", n); }
 void run_B_boost(size_t n) { child_B<BoostMap>("boost_flat", n); }
+void run_B_boost_node(size_t n) { child_B<BoostNodeMap>("boost_node", n); }
 void run_B_std(size_t n) { child_B<StdMap>("std_unordered", n); }
+#ifdef HAS_ABSL
+void run_B_absl(size_t n) { child_B<AbslMap>("absl_flat", n); }
+#endif
 
 }  // namespace
 
@@ -221,7 +238,7 @@ int main(int argc, char** argv) {
 
   std::printf("# maps: sflat (1.5x growth, mlf=0.875, AVX2 groups) vs "
               "emhash8 1.7.4 (mlf=0.80) vs boost::unordered_flat_map vs "
-              "std::unordered_map\n");
+              "boost::unordered_map vs std::unordered_map\n");
   std::printf("# cpu: x86-64, flags: -O3 -march=native -std=c++17\n");
   std::printf("# times are ns/op; rss values are child peak RSS in MiB\n\n");
 
@@ -242,24 +259,60 @@ int main(int argc, char** argv) {
         run_child([] { run_A_emhash(g_n); });
     const long rss_boost =
         run_child([] { run_A_boost(g_n); });
+    const long rss_boost_node =
+        run_child([] { run_A_boost_node(g_n); });
     const long rss_std =
         run_child([] { run_A_std(g_n); });
+#ifdef HAS_ABSL
+    const long rss_absl =
+        run_child([] { run_A_absl(g_n); });
+#endif
     std::printf(
-        "  peak_rss MiB: baseline=%.1f sflat=%.1f emhash8=%.1f boost_flat=%.1f std=%.1f\n",
+        "  peak_rss MiB: baseline=%.1f sflat=%.1f emhash8=%.1f boost_flat=%.1f boost_node=%.1f std=%.1f"
+#ifdef HAS_ABSL
+        " absl=%.1f"
+#endif
+        "\n",
         rss_base / 1024.0, rss_sflat / 1024.0, rss_emhash / 1024.0,
-        rss_boost / 1024.0, rss_std / 1024.0);
+        rss_boost / 1024.0, rss_boost_node / 1024.0, rss_std / 1024.0
+#ifdef HAS_ABSL
+        , rss_absl / 1024.0
+#endif
+        );
     std::printf(
         "  map-only MiB (minus baseline): sflat=%.1f emhash8=%.1f "
-        "boost_flat=%.1f std=%.1f  => bytes/entry: %.1f / %.1f / %.1f / %.1f\n",
+        "boost_flat=%.1f boost_node=%.1f std=%.1f"
+#ifdef HAS_ABSL
+        " absl=%.1f"
+#endif
+        "  => bytes/entry: %.1f / %.1f / %.1f / %.1f / %.1f"
+#ifdef HAS_ABSL
+        " / %.1f"
+#endif
+        "\n",
         (rss_sflat - rss_base) / 1024.0, (rss_emhash - rss_base) / 1024.0,
-        (rss_boost - rss_base) / 1024.0, (rss_std - rss_base) / 1024.0,
+        (rss_boost - rss_base) / 1024.0, (rss_boost_node - rss_base) / 1024.0,
+        (rss_std - rss_base) / 1024.0
+#ifdef HAS_ABSL
+        , (rss_absl - rss_base) / 1024.0
+#endif
+        ,
         (rss_sflat - rss_base) * 1024.0 / n, (rss_emhash - rss_base) * 1024.0 / n,
-        (rss_boost - rss_base) * 1024.0 / n, (rss_std - rss_base) * 1024.0 / n);
+        (rss_boost - rss_base) * 1024.0 / n, (rss_boost_node - rss_base) * 1024.0 / n,
+        (rss_std - rss_base) * 1024.0 / n
+#ifdef HAS_ABSL
+        , (rss_absl - rss_base) * 1024.0 / n
+#endif
+        );
     // scenario B (no reserve)
     run_child([] { run_B_sflat(g_n); });
     run_child([] { run_B_emhash(g_n); });
     run_child([] { run_B_boost(g_n); });
+    run_child([] { run_B_boost_node(g_n); });
     run_child([] { run_B_std(g_n); });
+#ifdef HAS_ABSL
+    run_child([] { run_B_absl(g_n); });
+#endif
     std::printf("\n");
     std::fflush(stdout);
   }
