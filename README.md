@@ -4,9 +4,10 @@ sflat::flat_hash_map is a C++17 header-only hash map. It uses open
 addressing. The interface matches the common subset of std::unordered_map.
 
 The design has three goals. First, insert and find are fast. Second, the
-growth factor is 1.5x, not 2x. This uses less memory. Third, incremental
-rehash avoids a latency spike during growth. The map suits large data sets
-where steady-state memory is important.
+growth factor is 1.5x, not 2x. This uses less memory. Third, growth is
+incremental and gives old pages back to the kernel. This avoids a latency
+spike and keeps the growth memory peak low. The map suits large data sets
+where memory is important.
 
 ## File structure
 
@@ -63,13 +64,12 @@ The map has three arrays.
   ```
 - The default max load factor is 0.875.
 - **Incremental rehash**: the map does not move all items at once during
-  growth. Each operation moves 64 slots to the new table. This avoids a
-  latency spike. It does **not** decrease the transient memory peak: the old
-  table (1x) and the new table (1.5x) are both alive until the migration
-  ends. The measured growth peak is in the benchmark below. During migration,
-  `find` checks the new table first and then the old table. `insert` writes
-  only to the new table. `begin()` completes the migration first, because
-  iteration is not a hot path.
+  growth. Each insert moves the next 64 old slots (two groups) to the new
+  table. This avoids a latency spike. See "Growth memory" below for how the
+  map keeps the memory peak low.
+- During a migration, `find` checks the new table first and then the old
+  table. `find`, `erase` and iteration never move items. Only inserts move
+  the migration forward. `finish_migration()` completes it at once.
 
 Memory formula for `uint64_t -> uint64_t`:
 ```
@@ -77,6 +77,60 @@ bytes/entry = (16 + 1 + 1/32) / 0.875 = about 19.5
 ```
 The measured value is 19.5 to 20.7 bytes/entry. The difference is allocator
 overhead.
+
+### Growth memory (Linux)
+
+With `std::allocator` on Linux, each array of 2 MiB or more gets its own
+2 MiB-aligned `mmap`. Smaller arrays use `operator new` with 64-byte
+alignment, so a control group never crosses two cache lines.
+
+A plain incremental rehash keeps the full old table (1x) and the full new
+table (1.5x) alive until the migration ends. The map avoids this peak in
+three steps:
+
+1. **Ordered migration.** Fastrange is monotonic in the hash. A key at
+   relative position x in the old table has its home at the same relative
+   position x in the new table. The migration reads the old table in index
+   order, so it writes the new table in index order too.
+2. **New keys stay in order.** During a migration, a new key whose old home
+   group is ahead of the migration front goes into the old table. The old
+   table still has about 12 percent free slots. The migration moves the key
+   later. Thus the new table gets writes only near the front.
+3. **Page release.** Old slots behind the front are dead. The map gives
+   them back to the kernel with `madvise(MADV_DONTNEED)`, one 2 MiB page at
+   a time. New pages are committed only when the front reaches them.
+
+At progress f, the resident memory is about `old * (1 - f) + new * f`. The
+peak is near the size of the new table, not old + new. The control bytes of
+both tables (1 byte per slot) stay resident until the migration ends.
+
+`reserve()` and `rehash()` do a full rehash at once. They also move items in
+index order and release the old slots behind the cursor.
+
+### Transparent huge pages (THP)
+
+Large tables cause many TLB misses with 4 KiB pages. The map asks for huge
+pages with `madvise(MADV_HUGEPAGE)`:
+
+- control bytes, overflow bytes, and slots after `reserve()`: at once;
+- slots of a growing table: a 2 MiB page just ahead of the migration front.
+  Pages far ahead of the front stay `MADV_NOHUGEPAGE`, so a rare stray write
+  does not commit a full 2 MiB page;
+- at the end of a migration, `MADV_COLLAPSE` (Linux 6.1 and later) converts
+  the few 4 KiB pages that were written before their hint.
+
+The system THP setting must be `madvise` or `always`
+(`/sys/kernel/mm/transparent_hugepage/enabled`). With `never`, the hints
+have no effect.
+
+Configuration macros (define before the include):
+
+| Macro | Default | Effect |
+|-------|---------|--------|
+| `SFLAT_USE_MMAP` | 1 on Linux | 0: use `operator new` for all arrays. No page release, no THP. |
+| `SFLAT_USE_THP` | 1 | 0: keep `mmap` and page release, but give no huge page hints. |
+
+A custom allocator disables both. The map then uses only the allocator.
 
 ### Why 1.5x uses less memory than 2x
 
@@ -141,11 +195,10 @@ Limits (common trade-offs of open addressing):
 - Bucket and local iterators do not have full standard semantics.
   `begin(size_t)` and related functions are approximate.
 - `erase` uses tombstones. After many deletions, call `rehash`.
-- During a migration, some `const` functions (`find`, `count`, `contains`,
-  `at`, `begin`, `cbegin`) change internal state. They move items to the
-  new table. Thus concurrent reads from many threads are not safe while a
-  migration is in progress. Call `finish_migration()` (or `begin()`) from
-  one thread before you share the map for reads.
+- `const` functions never change the map, also during a migration. Many
+  threads can read at the same time while no thread writes.
+- `erase` never moves other items. `it = m.erase(it)` loops are safe, also
+  during a migration.
 - The `overflow_` array needs fewer than 2^32 groups. This is 137 billion
   slots. In practice the map never reaches this limit.
 

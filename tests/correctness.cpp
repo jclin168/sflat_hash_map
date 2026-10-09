@@ -364,6 +364,69 @@ void test_during_migration() {
   std::printf("test_during_migration OK\n");
 }
 
+// Large tables (arrays >= 2 MiB use mmap, THP and page release on Linux):
+// mixed operations against std::unordered_map across several growths, with
+// checks while a migration is in progress.
+void test_large_mixed() {
+  using Map = sflat::flat_hash_map<uint64_t, uint64_t>;
+  std::mt19937_64 rng(777);
+  Map m;
+  std::unordered_map<uint64_t, uint64_t> r;
+  size_t migrating_checks = 0;
+  size_t last_bc = 0;
+  for (int i = 0; i < 1500000; ++i) {
+    const uint64_t k = rng() % 1200000;
+    const int op = rng() % 10;
+    if (op < 6) {
+      const uint64_t v = rng();
+      CHECK(m.insert_or_assign(k, v).second == !r.count(k));
+      r[k] = v;
+    } else if (op < 8) {
+      CHECK(m.erase(k) == r.erase(k));
+    } else {
+      auto it = m.find(k);
+      auto rit = r.find(k);
+      CHECK((it == m.end()) == (rit == r.end()));
+      if (rit != r.end()) CHECK(it->second == rit->second);
+    }
+    // Shortly after each growth, compare everything and erase while
+    // iterating (the migration is still in progress at this point).
+    if (m.bucket_count() != last_bc) {
+      last_bc = m.bucket_count();
+      if (m.size() > 100000) {
+        for (int j = 0; j < 50; ++j) {  // let the migration run a bit
+          const uint64_t kk = rng() % 1200000;
+          m[kk] = kk;
+          r[kk] = kk;
+        }
+        CHECK(m.size() == r.size());
+        size_t n = 0;
+        for (auto it = m.begin(); it != m.end();) {
+          auto rit = r.find(it->first);
+          CHECK(rit != r.end() && rit->second == it->second);
+          ++n;
+          if (it->first % 97 == 0) {
+            r.erase(it->first);
+            it = m.erase(it);
+          } else {
+            ++it;
+          }
+        }
+        CHECK(m.size() == r.size());
+        ++migrating_checks;
+      }
+    }
+  }
+  CHECK(maps_equal(m, r));
+  CHECK(migrating_checks > 0);
+  Map c(m);
+  CHECK(maps_equal(c, r));
+  m.optimize();
+  CHECK(maps_equal(m, r));
+  std::printf("test_large_mixed OK (%zu checks during growth)\n",
+              migrating_checks);
+}
+
 int main() {
   test_api_surface();
   test_random_ops();
@@ -371,6 +434,7 @@ int main() {
   test_growth_factor();
   test_sequential_keys();
   test_during_migration();
+  test_large_mixed();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
   return 0;
 }
