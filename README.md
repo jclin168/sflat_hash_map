@@ -123,19 +123,22 @@ Erase 不清除 overflow bits（保守正確），rehash 會重建。
 
 **n = 1,000,000**
 
-| 操作 | sflat | emhash8 | boost | std |
-|------|-------|---------|-------|-----|
-| insert（已 reserve） | 34.3 | 43.5 | 49.9 | 142.0 |
-| find（hit） | 22.8 | **13.1** | 23.1 | 43.2 |
-| find（miss） | 26.4 | 13.9 | **7.1** | 62.6 |
-| erase | 34.2 | 28.2 | **27.0** | 156.8 |
-| iterate | 16.8 | **0.6** | 18.4 | 70.4 |
-| bytes/entry | **20.2** | 33.6 | 34.3 | 41.5 |
-| insert（無 reserve，含成長） | 100.4 | 114.2 | **70.6** | 256.0 |
+| 操作 | sflat | emhash8 | boost_flat | boost_node | std |
+|------|-------|---------|------------|------------|-----|
+| insert（已 reserve） | 34.3 | 43.5 | 49.9 | 112.5 | 142.0 |
+| find（hit） | 22.8 | **13.1** | 23.1 | 29.5 | 43.2 |
+| find（miss） | 26.4 | 13.9 | **6.6** | 36.5 | 59.7 |
+| erase | 34.2 | 28.2 | **20.8** | 85.0 | 131.7 |
+| iterate | 16.8 | **0.5** | 18.3 | 24.3 | 38.1 |
+| bytes/entry | **20.2** | 33.4 | 34.3 | 46.0 | 41.1 |
+| insert（無 reserve，含成長） | 95.6 | 104.4 | **68.2** | 184.3 | 235.6 |
 
 註：sflat 的 insert（已 reserve）34.3ns 為直接測量值；benchmark 表中的 46.1ns
 包含了 reserve 成本。Incremental rehash 使無 reserve 插入從 68ns 變成 100ns
 （+47%），換取成長期間無 2.5x 記憶體峰值、無 latency spike。
+
+註2：boost_node = boost::unordered_map（node-based）。absl::flat_hash_map 因
+編譯依賴複雜（需完整 Abseil 工具鏈），未納入本次評比。
 
 **n = 5,000,000**
 
