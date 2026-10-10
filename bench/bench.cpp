@@ -31,6 +31,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <random>
 #include <vector>
 
 namespace {
@@ -76,8 +78,10 @@ struct Ops<emhash8::HashMap<uint64_t, uint64_t>> {
   static size_t do_erase(Map& m, uint64_t k) { return m.erase(k); }
 };
 
+// shuffled: the keys in a random order (part of the baseline memory).
 void gen_arrays(size_t n, std::vector<uint64_t>& keys,
-                std::vector<uint64_t>& vals, std::vector<uint64_t>& miss) {
+                std::vector<uint64_t>& vals, std::vector<uint64_t>& miss,
+                std::vector<uint64_t>& shuffled) {
   keys.resize(n);
   vals.resize(n);
   miss.resize(n);
@@ -88,13 +92,15 @@ void gen_arrays(size_t n, std::vector<uint64_t>& keys,
   }
   s = 0xFEDCBA9876543210ULL;
   for (size_t i = 0; i < n; ++i) miss[i] = splitmix64(s);
+  shuffled = keys;
+  std::shuffle(shuffled.begin(), shuffled.end(), std::mt19937_64(42));
 }
 
 // Scenario A: reserved insert + finds + erase + iteration. Map stays alive.
 template <typename Map>
 void child_A(const char* name, size_t n) {
-  std::vector<uint64_t> keys, vals, miss;
-  gen_arrays(n, keys, vals, miss);
+  std::vector<uint64_t> keys, vals, miss, shuffled;
+  gen_arrays(n, keys, vals, miss, shuffled);
   volatile uint64_t sink = 0;
 
   Map m;
@@ -111,6 +117,20 @@ void child_A(const char* name, size_t n) {
         uint64_t acc = 0;
         for (size_t i = 0; i < n; ++i) {
           auto it = Ops<Map>::do_find(m, keys[i]);
+          if (it != m.end()) acc += it->second;
+        }
+        sink = acc;
+      },
+      n);
+
+  // Hits in a random order. Insertion order favors maps that store the
+  // elements densely in insertion order (emhash8): the element reads are then
+  // sequential and the hardware prefetcher hides them.
+  const double t_hit_rand = ns_per_op(
+      [&] {
+        uint64_t acc = 0;
+        for (size_t i = 0; i < n; ++i) {
+          auto it = Ops<Map>::do_find(m, shuffled[i]);
           if (it != m.end()) acc += it->second;
         }
         sink = acc;
@@ -147,9 +167,9 @@ void child_A(const char* name, size_t n) {
 
   // keep map alive; peak RSS is captured by the parent via wait4
   std::printf(
-      "A %-10s n=%-9zu insert=%7.1f find_hit=%7.1f find_miss=%7.1f "
-      "erase=%7.1f iter=%7.1f ns/op  size=%zu->%zu sink=%llu\n",
-      name, n, t_insert, t_hit, t_miss, t_erase, t_iter, after_insert,
+      "A %-10s n=%-9zu insert=%7.1f find_hit=%7.1f find_hit_rand=%7.1f "
+      "find_miss=%7.1f erase=%7.1f iter=%7.1f ns/op  size=%zu->%zu sink=%llu\n",
+      name, n, t_insert, t_hit, t_hit_rand, t_miss, t_erase, t_iter, after_insert,
       after_erase, (unsigned long long)sink);
   std::fflush(stdout);
 }
@@ -157,8 +177,8 @@ void child_A(const char* name, size_t n) {
 // Scenario B: insert with NO reserve (growth policy under test).
 template <typename Map>
 void child_B(const char* name, size_t n) {
-  std::vector<uint64_t> keys, vals, miss;
-  gen_arrays(n, keys, vals, miss);
+  std::vector<uint64_t> keys, vals, miss, shuffled;
+  gen_arrays(n, keys, vals, miss, shuffled);
   Map m;
   const double t_insert = ns_per_op(
       [&] {
@@ -177,10 +197,27 @@ void child_B(const char* name, size_t n) {
   std::fflush(stdout);
 }
 
+// Touch (and free) memory once before the runs. In a VM the host backs guest
+// memory on first use, which is much slower than a normal page fault. Without
+// this step the first map in the run order pays that cost.
+void child_warmup(size_t bytes) {
+  const long pages = sysconf(_SC_PHYS_PAGES);
+  const long psize = sysconf(_SC_PAGE_SIZE);
+  if (pages > 0 && psize > 0) {
+    const size_t cap = static_cast<size_t>(pages) * psize / 4 * 3;
+    if (bytes > cap) bytes = cap;
+  }
+  std::vector<char> buf(bytes);
+  for (size_t i = 0; i < bytes; i += 4096) buf[i] = 1;
+  volatile char c = buf[bytes / 2];
+  (void)c;
+}
+
 void child_baseline(size_t n) {
-  std::vector<uint64_t> keys, vals, miss;
-  gen_arrays(n, keys, vals, miss);
-  volatile uint64_t acc = keys[n - 1] + vals[n - 1] + miss[n - 1];
+  std::vector<uint64_t> keys, vals, miss, shuffled;
+  gen_arrays(n, keys, vals, miss, shuffled);
+  volatile uint64_t acc =
+      keys[n - 1] + vals[n - 1] + miss[n - 1] + shuffled[n - 1];
   (void)acc;
 }
 
@@ -251,6 +288,7 @@ int main(int argc, char** argv) {
     // use small trampolines via statics
     static size_t g_n = 0;
     g_n = n;
+    run_child([] { child_warmup(g_n * 80); });
     const long rss_base =
         run_child([] { child_baseline(g_n); });
     const long rss_sflat =
