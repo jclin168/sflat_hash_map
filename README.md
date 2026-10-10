@@ -143,9 +143,9 @@ to about 2.5x and 1.5x. For 100M entries at 16 bytes each:
 | 2x       | about 3.2 GB         | about 4.8 GB |
 | 1.5x     | about 2.1 GB         | about 3.5 GB |
 
-These are theoretical estimates. They are the worst case for each strategy.
-The actual peak also depends on where `n` falls relative to the growth
-steps. See the note below.
+These are theoretical estimates for a plain rehash. They are the worst case
+for each strategy. sflat releases old pages during growth, so its measured
+peak is lower (see "Growth memory").
 
 ### SIMD probing
 
@@ -219,113 +219,144 @@ No reorganization can fix that.
 prefetches home buckets before the finds to overlap DRAM accesses. This
 helps when the table does not fit in cache.
 
-Measured speedup: 1.04x at 100M entries (80.8 ns to 77.9 ns per op). No
-gain at 10M. The CPU already overlaps misses well in a simple loop. The
+Measured speedup (older version of the map): 1.04x at 100M entries (80.8 ns
+to 77.9 ns per op). No gain at 10M. The CPU already overlaps misses well in a simple loop. The
 benefit grows with table size.
 
 ## Benchmark
 
 ### Test environment
 
-- CPU: Intel Xeon @ 2.10 GHz (4 vCPU, AVX2 and AVX-512), RAM 15 GiB.
+- CPU: Intel Xeon @ 2.10 GHz (4 vCPU, AVX2 and AVX-512, 260 MiB L3),
+  RAM 15 GiB. The machine is a VM.
+- Kernel: Linux 6.18. THP setting `madvise`.
 - Compiler: g++ 13.3.0 with `-O3 -march=native -std=c++17`.
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
-  std::unordered_map (libstdc++ 13).
+  std::unordered_map (libstdc++ 13). They use glibc malloc without THP.
 - Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
-  child process. Memory is the child peak RSS minus the baseline (key and
-  value arrays only).
-- One run per size. Expect about 10 percent noise between runs.
+  child process. Memory is the child peak RSS minus the baseline (the input
+  arrays only).
+- Before each size, a warm-up child touches and frees memory. In a VM the
+  host backs guest memory on first use, which is very slow. Without the
+  warm-up, the first map in the run order pays this cost.
+- 1M and 10M: median of 3 runs. 100M: 1 run.
 
 ### Results
 
 Lower ns/op is better. Lower bytes/entry is better. **Bold** is the best
 value in the row.
 
-"insert (reserved)" includes the `reserve(n)` call. "growth peak" is the
-peak RSS of the no-reserve test. It includes the time when the old and the
-new table are both alive.
+- "insert (reserved)" includes the `reserve(n)` call.
+- "find hit (insert order)" asks for the keys in insertion order. This
+  favors emhash8, which stores the elements densely in insertion order: its
+  element reads become sequential. "find hit (random order)" is the fair
+  test.
+- "growth peak" is the peak RSS of the no-reserve test.
 
 **n = 1,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | std |
 |-----------|-------|---------|------------|------------|-----|
-| insert (reserved) | 34.6 | 35.6 | **25.7** | 81.6 | 100.3 |
-| find (hit) | 20.3 | 9.4 | **9.2** | 18.6 | 24.7 |
-| find (miss) | 17.1 | 13.0 | **5.2** | 20.9 | 34.1 |
-| erase | 20.8 | 22.5 | **11.6** | 46.4 | 66.8 |
-| iterate | 10.8 | **0.6** | 11.0 | 14.2 | 24.0 |
-| insert (no reserve) | 68.0 | 86.2 | **49.8** | 136.4 | 164.8 |
-| bytes/entry (steady) | **20.7** | 34.1 | 34.8 | 46.7 | 41.9 |
-| bytes/entry (growth peak) | 39.1 | **36.1** | 51.1 | 46.7 | 45.2 |
+| insert (reserved) | 31.4 | 37.3 | **29.9** | 95.4 | 141.7 |
+| find hit (insert order) | 11.8 | **9.2** | 11.2 | 21.9 | 31.5 |
+| find hit (random order) | 12.2 | 13.5 | **10.5** | 25.6 | 32.2 |
+| find miss | 15.0 | 12.8 | **5.9** | 24.4 | 39.9 |
+| erase | 16.9 | 22.8 | **14.4** | 54.3 | 82.7 |
+| iterate | 11.6 | **0.5** | 10.1 | 16.6 | 29.4 |
+| insert (no reserve) | 64.1 | 90.1 | **56.9** | 162.7 | 180.4 |
+| bytes/entry (steady) | **21.4** | 34.0 | 34.8 | 46.7 | 41.8 |
+| bytes/entry (growth peak) | **29.4** | 36.2 | 51.2 | 46.7 | 45.2 |
 
 **n = 10,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | std |
 |-----------|-------|---------|------------|------------|-----|
-| insert (reserved) | 107.9 | 92.8 | **35.9** | 224.1 | 245.8 |
-| find (hit) | 36.7 | **20.6** | 27.0 | 39.6 | 48.6 |
-| find (miss) | 27.8 | 21.4 | **11.4** | 50.2 | 66.2 |
-| erase | 50.6 | 52.7 | **37.3** | 110.2 | 189.0 |
-| iterate | 12.4 | **1.7** | 12.7 | 30.6 | 76.2 |
-| insert (no reserve) | 211.9 | 122.8 | **92.3** | 342.5 | 452.4 |
-| bytes/entry (steady) | **19.6** | 29.5 | 27.0 | 42.8 | 40.4 |
-| bytes/entry (growth peak) | 42.5 | **29.6** | 40.3 | 42.8 | 41.9 |
+| insert (reserved) | 96.8 | 61.6 | **36.0** | 169.4 | 222.9 |
+| find hit (insert order) | 25.5 | **20.0** | 26.2 | 40.5 | 53.3 |
+| find hit (random order) | 31.4 | 32.7 | **27.3** | 53.7 | 70.1 |
+| find miss | 23.2 | 22.2 | **11.1** | 49.9 | 80.8 |
+| erase | 39.6 | 50.1 | **32.1** | 120.9 | 203.8 |
+| iterate | 13.1 | **1.0** | 11.5 | 30.2 | 78.2 |
+| insert (no reserve) | 166.8 | 116.4 | **56.1** | 256.3 | 372.4 |
+| bytes/entry (steady) | **19.9** | 29.5 | 27.0 | 42.8 | 40.4 |
+| bytes/entry (growth peak) | **27.3** | 29.6 | 40.4 | 42.8 | 41.9 |
 
 **n = 100,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | std |
 |-----------|-------|---------|------------|------------|-----|
-| insert (reserved) | 138.2 | 120.1 | **55.3** | 318.2 | 353.8 |
-| find (hit) | 71.7 | **35.0** | 43.2 | 56.3 | 66.5 |
-| find (miss) | 43.2 | 34.8 | **22.4** | 75.4 | 81.4 |
-| erase | 92.8 | 79.1 | **54.2** | 158.1 | 265.9 |
-| iterate | 11.8 | **1.8** | 11.8 | 43.0 | 108.2 |
-| insert (no reserve) | 236.5 | 167.0 | **108.5** | 432.2 | 611.6 |
+| insert (reserved) | **76.5** | 145.6 | 78.5 | 348.2 | 369.3 |
+| find hit (insert order) | 43.9 | **31.9** | 41.9 | 56.6 | 68.9 |
+| find hit (random order) | 43.0 | 49.9 | **42.1** | 75.1 | 90.6 |
+| find miss | 32.5 | 34.4 | **20.4** | 71.8 | 99.3 |
+| erase | 63.6 | 76.5 | **48.5** | 174.1 | 298.1 |
+| iterate | 13.3 | **1.1** | 11.3 | 43.4 | 125.4 |
+| insert (no reserve) | 159.8 | 233.6 | **131.1** | 435.1 | 641.0 |
 | bytes/entry (steady) | **19.5** | 26.7 | 21.5 | 40.6 | 40.1 |
-| bytes/entry (growth peak) | 48.7 | **26.7** | 32.2 | 40.6 | 40.1 |
+| bytes/entry (growth peak) | **25.2** | 26.7 | 32.2 | 40.6 | 40.1 |
+
+### Insert latency during growth
+
+Insert 10M keys with no `reserve`. Each insert is timed.
+
+| Map | total | p99.9 | p99.99 | max |
+|-----|-------|-------|--------|-----|
+| sflat | 2.8 s | 2.2 us | 21 us | **30 ms** |
+| boost_flat | **2.1 s** | **0.5 us** | **15 us** | 163 ms |
+| emhash8 | 3.4 s | 2.3 us | 19 us | 267 ms |
+
+boost_flat and emhash8 rehash the full table in one insert. sflat spreads
+the rehash over many inserts. Its worst case is 5 to 9 times smaller. The
+remaining 30 ms is mostly huge page faults and the final `MADV_COLLAPSE`.
+
+### THP on and off (sflat only)
+
+THP cuts TLB misses but makes each first touch of a 2 MiB page slower. This
+VM uses free page reporting, so a new huge page often needs host work too.
+On bare metal a huge page fault usually costs only the time to clear 2 MiB.
+
+| sflat, ns/op | 10M, THP off | 10M, THP on | 100M, THP off | 100M, THP on |
+|--------------|--------------|-------------|---------------|--------------|
+| insert (reserved) | **46 to 50** | 88 to 97 | 98.9 | **76.5** |
+| find hit (random order) | 31 to 33 | **27 to 31** | 51.6 | **43.0** |
+| insert (no reserve) | **99 to 102** | 108 to 167 | 197.0 | **159.8** |
+
+At 100M, THP is better in all rows. At 10M the table fits in the 260 MiB L3
+of this CPU, so the TLB gain is small and the fault cost is larger. To turn
+THP off, define `SFLAT_USE_THP=0`.
 
 ### Honest assessment
 
-- **memory (steady state)**: this is the main strength of sflat. It uses
-  the least memory at all sizes: 9 to 41 percent less than boost_flat, 27
-  to 39 percent less than emhash8, and about half of the node-based maps.
-- **memory (growth peak)**: sflat has the **highest** peak at 10M and 100M.
-  Incremental rehash keeps the old and the new table alive together for
-  many operations. Thus it does not decrease the peak. If the peak is
-  important, call `reserve(n)` first.
-- **insert (reserved)**: boost_flat is 1.3x to 3x faster. After
-  `reserve(n)`, sflat fills the table to its 0.875 load limit. boost_flat
-  and emhash8 round the capacity up to a power of two. Their final load is
-  0.6 to 0.8. Thus sflat probes longer chains. This is the cost of
-  the smaller memory.
-- **find (hit)**: sflat is 1.8x to 2.2x slower than the best (emhash8 or
-  boost_flat). It is faster than std::unordered_map at 1M and 10M.
-- **find (miss)**: sflat is 1.9x to 3.3x slower than boost_flat. The same
-  high load causes this. Many home groups are full, so the overflow bits
-  are often set.
-- **erase**: within 1.8x of boost_flat. Faster than the node-based maps.
-- **iterate**: equal to boost_flat. emhash8 is much faster because it keeps
-  the values in a dense array.
-- **flat versus node maps**: all three flat maps are faster than
-  boost::unordered_map and std::unordered_map in most operations. The only
-  exceptions are find (hit) at 100M and at 1M, where the node maps are
-  equal to or slightly faster than sflat.
+- **memory (steady state)**: sflat uses the least memory at all sizes: 9 to
+  38 percent less than boost_flat and 27 to 37 percent less than emhash8.
+- **memory (growth peak)**: sflat now has the lowest peak at all sizes (25
+  to 29 bytes/entry). Before page release it was 39 to 49.
+- **insert (reserved)**: at 100M sflat is the fastest (76.5 ns, boost_flat
+  78.5). At 1M it is within 5 percent of boost_flat. At 10M the THP faults
+  in this VM make it slow. With THP off it is 46 to 50 ns, boost_flat 36.
+- **find hit (random order)**: sflat is within 2 to 16 percent of
+  boost_flat and faster than emhash8 at all sizes.
+- **find miss**: boost_flat is still 1.6 to 2.5 times faster. sflat fills
+  the table to 0.875, so the overflow bits are often set.
+- **insert (no reserve)**: boost_flat is faster (1.1x to 3x). With 1.5x
+  growth each element moves about twice; with 2x growth about once.
+- **erase and iterate**: not a goal. Both are within 1.3x of boost_flat.
 
 ### Large-scale estimates (not measured)
 
 The table below extrapolates from the measured steady-state bytes/entry.
 
-| Entries | sflat (about 20 B/entry) | boost (about 30 B/entry) |
+| Entries | sflat (about 20 B/entry) | boost_flat (about 30 B/entry) |
 |---------|--------------------------|--------------------------|
 | 100M    | about 2.0 GB             | about 3.0 GB             |
 | 1B      | about 20 GB              | about 30 GB              |
 | 100B    | about 2.0 TB             | about 3.0 TB             |
 
-Also, 1.5x growth has a peak of about 2.5x of steady state during rehash.
-2x growth has a peak of about 3x. The 1.5x strategy is kinder to
-memory-limited large tables. These numbers are theoretical. The actual
-values depend on the allocator and on the key and value sizes.
+With page release, the growth peak is about the size of the new table
+(1.5x of the old table) plus the control bytes. The measured peak is 25 to
+29 bytes/entry. The actual values depend on the allocator and on the key
+and value sizes.
 
 ## Correctness tests
 
