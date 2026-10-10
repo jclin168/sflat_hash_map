@@ -5,7 +5,8 @@
 // An open-addressing hash map with an std::unordered_map-compatible interface
 // (C++17), designed for very large tables:
 //
-//  * SIMD group probing (SSE2 x16, AVX2 x32 when available) à la SwissTable.
+//  * SIMD group probing à la SwissTable: SSE2 x16 or AVX2 x32 on x86-64,
+//    NEON x16 on ARM (incl. Apple Silicon), portable SWAR x8 elsewhere.
 //  * The growth factor shrinks as the table gets large (2x, then 1.5x, then
 //    1.25x; see SFLAT_GROW_2X_BELOW). Capacities are any multiple of the
 //    group width (not restricted to powers of two) thanks to Lemire's
@@ -39,13 +40,56 @@
 #include <type_traits>
 #include <utility>
 
+// SIMD back end for group probing (define SFLAT_NO_SIMD=1 to force the
+// portable one):
+//   SFLAT_SIMD_AVX2  x86-64 with AVX2, 32 control bytes per group
+//   SFLAT_SIMD_SSE2  x86-64 baseline, 16 per group
+//   SFLAT_SIMD_NEON  ARM NEON (AArch64, Apple Silicon, ARMv7 + NEON), 16
+//   SFLAT_SIMD_SWAR  any other CPU: 8 per group in a uint64_t
+#if !defined(SFLAT_NO_SIMD)
+#define SFLAT_NO_SIMD 0
+#endif
+#if !SFLAT_NO_SIMD && defined(__AVX2__)
+#define SFLAT_SIMD_AVX2 1
+#elif !SFLAT_NO_SIMD &&                                   \
+    (defined(__SSE2__) || defined(_M_X64) ||              \
+     (defined(_M_IX86_FP) && _M_IX86_FP >= 2))
+#define SFLAT_SIMD_SSE2 1
+#elif !SFLAT_NO_SIMD &&                                              \
+    (defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(_M_ARM64)) && \
+    !defined(__ARM_BIG_ENDIAN)
+#define SFLAT_SIMD_NEON 1
+#else
+#define SFLAT_SIMD_SWAR 1
+#endif
+
+// SFLAT_PREFETCH_SLOTS=1: find() prefetches the home group's slots before it
+// reads the control bytes, so the two cache misses overlap. Default: on for
+// NEON (measured on Apple M2 together with the inlining below: hits 20-35%
+// faster; misses about the same), off elsewhere. The NEON build also forces
+// find() inline: on the M2 the out-of-line call cost 13-19% at 10M entries.
+#if !defined(SFLAT_PREFETCH_SLOTS)
+#if defined(SFLAT_SIMD_NEON)
+#define SFLAT_PREFETCH_SLOTS 1
+#else
+#define SFLAT_PREFETCH_SLOTS 0
+#endif
+#endif
+#if defined(SFLAT_SIMD_NEON) && (defined(__GNUC__) || defined(__clang__))
+#define SFLAT_FIND_INLINE __attribute__((always_inline))
+#else
+#define SFLAT_FIND_INLINE
+#endif
+
 #if defined(_MSC_VER)
 #include <intrin.h>
-#else
-#include <emmintrin.h>  // SSE2 (always present on x86-64)
-#if defined(__AVX2__)
-#include <immintrin.h>
 #endif
+#if defined(SFLAT_SIMD_AVX2)
+#include <immintrin.h>
+#elif defined(SFLAT_SIMD_SSE2)
+#include <emmintrin.h>
+#elif defined(SFLAT_SIMD_NEON)
+#include <arm_neon.h>
 #endif
 
 // SFLAT_USE_MMAP=0 disables the mmap memory path (default: on for Linux).
@@ -141,7 +185,7 @@ inline uint8_t OverflowBit(uint64_t h) noexcept {
   return static_cast<uint8_t>(1u << ((h >> 8) & 7u));
 }
 
-inline unsigned Ctzb(uint32_t x) noexcept {
+inline unsigned Ctz(uint32_t x) noexcept {
 #if defined(_MSC_VER)
   unsigned long i;
   _BitScanForward(&i, x);
@@ -151,37 +195,104 @@ inline unsigned Ctzb(uint32_t x) noexcept {
 #endif
 }
 
-#if defined(__AVX2__)
+inline unsigned Ctz(uint64_t x) noexcept {
+#if defined(_MSC_VER)
+  unsigned long i;
+  _BitScanForward64(&i, x);
+  return static_cast<unsigned>(i);
+#else
+  return static_cast<unsigned>(__builtin_ctzll(x));
+#endif
+}
+
+// A group is kWidth control bytes probed at once. Match(c) returns a Mask
+// with one set bit per lane equal to c, somewhere in bits
+// [lane << kShift, (lane + 1) << kShift). So `m &= m - 1` drops one lane,
+// Lane(m) is the lowest matching lane, and kAll has the bit of every lane.
+#if defined(SFLAT_SIMD_AVX2)
 // 32 control bytes per group.
 struct Group {
   static constexpr size_t kWidth = 32;
+  using Mask = uint32_t;
+  static constexpr unsigned kShift = 0;
+  static constexpr Mask kAll = 0xFFFFFFFFu;
   __m256i v;
   static Group Load(const uint8_t* p) noexcept {
     Group g;
     g.v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
     return g;
   }
-  // Bitmask of lanes equal to c.
-  uint32_t Match(uint8_t c) const noexcept {
-    return static_cast<uint32_t>(_mm256_movemask_epi8(
+  Mask Match(uint8_t c) const noexcept {
+    return static_cast<Mask>(_mm256_movemask_epi8(
         _mm256_cmpeq_epi8(v, _mm256_set1_epi8(static_cast<char>(c)))));
   }
+  static unsigned Lane(Mask m) noexcept { return Ctz(m); }
 };
-#else
+#elif defined(SFLAT_SIMD_SSE2)
 // 16 control bytes per group (SSE2 baseline, always available on x86-64).
 struct Group {
   static constexpr size_t kWidth = 16;
+  using Mask = uint32_t;
+  static constexpr unsigned kShift = 0;
+  static constexpr Mask kAll = 0xFFFFu;
   __m128i v;
   static Group Load(const uint8_t* p) noexcept {
     Group g;
     g.v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
     return g;
   }
-  uint32_t Match(uint8_t c) const noexcept {
-    return static_cast<uint32_t>(_mm_movemask_epi8(
-               _mm_cmpeq_epi8(v, _mm_set1_epi8(static_cast<char>(c))))) &
-           0xFFFFu;
+  Mask Match(uint8_t c) const noexcept {
+    return static_cast<Mask>(_mm_movemask_epi8(
+        _mm_cmpeq_epi8(v, _mm_set1_epi8(static_cast<char>(c)))));
   }
+  static unsigned Lane(Mask m) noexcept { return Ctz(m); }
+};
+#elif defined(SFLAT_SIMD_NEON)
+// 16 control bytes per group. NEON has no movemask; the compare result is
+// narrowed to 4 bits per lane instead (SHRN, 1 instruction) and moved to a
+// general register as a 64-bit mask. Keeping only the top bit of each nibble
+// gives one bit per lane.
+struct Group {
+  static constexpr size_t kWidth = 16;
+  using Mask = uint64_t;
+  static constexpr unsigned kShift = 2;
+  static constexpr Mask kAll = 0x8888888888888888ULL;
+  uint8x16_t v;
+  static Group Load(const uint8_t* p) noexcept {
+    Group g;
+    g.v = vld1q_u8(p);
+    return g;
+  }
+  Mask Match(uint8_t c) const noexcept {
+    const uint8x16_t eq = vceqq_u8(v, vdupq_n_u8(c));
+    const uint8x8_t nib = vshrn_n_u16(vreinterpretq_u16_u8(eq), 4);
+    return vget_lane_u64(vreinterpret_u64_u8(nib), 0) & kAll;
+  }
+  static unsigned Lane(Mask m) noexcept { return Ctz(m) >> kShift; }
+};
+#else
+// Portable fallback: 8 control bytes per group in one uint64_t (SWAR).
+struct Group {
+  static constexpr size_t kWidth = 8;
+  using Mask = uint64_t;
+  static constexpr unsigned kShift = 3;
+  static constexpr Mask kAll = 0x8080808080808080ULL;
+  uint64_t v;
+  static Group Load(const uint8_t* p) noexcept {
+    Group g;
+    std::memcpy(&g.v, p, sizeof(g.v));
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    g.v = __builtin_bswap64(g.v);  // lane i in byte i, counted from the LSB
+#endif
+    return g;
+  }
+  // Exact zero-byte test (no false positives from borrows).
+  Mask Match(uint8_t c) const noexcept {
+    constexpr uint64_t kLo7 = 0x7F7F7F7F7F7F7F7FULL;
+    const uint64_t x = v ^ (0x0101010101010101ULL * c);
+    return ~(((x & kLo7) + kLo7) | x | kLo7);
+  }
+  static unsigned Lane(Mask m) noexcept { return Ctz(m) >> kShift; }
 };
 #endif
 
@@ -233,6 +344,8 @@ inline void PageFree(void* p, size_t bytes, size_t align) noexcept {
     ::munmap(p, RoundUp(bytes, kHugePage));
     return;
   }
+#else
+  (void)bytes;
 #endif
   ::operator delete(p, std::align_val_t(align));
 }
@@ -299,7 +412,9 @@ class flat_hash_map {
   using ctrl_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<uint8_t>;
   using ctrl_traits = std::allocator_traits<ctrl_alloc>;
 
-  static constexpr size_t kWidth = detail::Group::kWidth;
+  using Group = detail::Group;
+  using Mask = Group::Mask;
+  static constexpr size_t kWidth = Group::kWidth;
   static constexpr double kDefaultMaxLoadFactor = 0.875;
   // Largest capacity: Fastrange is 32-bit, so fewer than 2^32 groups (with
   // AVX2 about 137G slots), and the slot array must fit in size_t.
@@ -770,18 +885,31 @@ class flat_hash_map {
 
   // Element with key in the given table, or nullptr. A table with cap 0 must
   // have ctrl == empty_ctrl().
-  static const value_type* find_in(const key_type& key, uint64_t h,
-                                   const uint8_t* ctrl, const slot_type* slots,
-                                   size_t cap, const uint8_t* overflow,
-                                   const KeyEqual& equal) noexcept {
+  SFLAT_FIND_INLINE static const value_type* find_in(
+      const key_type& key, uint64_t h, const uint8_t* ctrl,
+      const slot_type* slots, size_t cap, const uint8_t* overflow,
+      const KeyEqual& equal) noexcept {
     const uint8_t hh = detail::H2(h);
     const size_t ng = cap / kWidth;
     const size_t home = detail::Fastrange(h, ng);
+#if SFLAT_PREFETCH_SLOTS
     {
-      detail::Group g = detail::Group::Load(ctrl + home * kWidth);
-      uint32_t m = g.Match(hh);
+      // Up to 256 bytes of the group (two 128-byte lines on Apple Silicon).
+      // Integer arithmetic: slots is nullptr in an empty table.
+      constexpr size_t kBytes = kWidth * sizeof(slot_type) < 256
+                                    ? kWidth * sizeof(slot_type)
+                                    : 256;
+      const uintptr_t p = reinterpret_cast<uintptr_t>(slots) +
+                          home * kWidth * sizeof(slot_type);
+      for (size_t o = 0; o < kBytes; o += 128)
+        __builtin_prefetch(reinterpret_cast<const void*>(p + o));
+    }
+#endif
+    {
+      Group g = Group::Load(ctrl + home * kWidth);
+      Mask m = g.Match(hh);
       while (m) {
-        const unsigned j = detail::Ctzb(m);
+        const unsigned j = Group::Lane(m);
         m &= m - 1;
         const value_type* e = reinterpret_cast<const value_type*>(
             &slots[home * kWidth + j]);
@@ -793,10 +921,10 @@ class flat_hash_map {
     size_t gi = home + 1;
     for (size_t k = 1; k < ng; ++k) {
       if (gi >= ng) gi -= ng;
-      detail::Group g = detail::Group::Load(ctrl + gi * kWidth);
-      uint32_t m = g.Match(hh);
+      Group g = Group::Load(ctrl + gi * kWidth);
+      Mask m = g.Match(hh);
       while (m) {
-        const unsigned j = detail::Ctzb(m);
+        const unsigned j = Group::Lane(m);
         m &= m - 1;
         const value_type* e = reinterpret_cast<const value_type*>(
             &slots[gi * kWidth + j]);
@@ -830,11 +958,11 @@ class flat_hash_map {
       if (gi >= ng) gi = 0;
       if (gi < front) gi = front;
       if (gi >= ng) return nullptr;
-      const detail::Group g = detail::Group::Load(old_ctrl_ + gi * kWidth);
-      uint32_t m = g.Match(hh);
+      const Group g = Group::Load(old_ctrl_ + gi * kWidth);
+      Mask m = g.Match(hh);
       while (m) {
         const value_type* e = reinterpret_cast<const value_type*>(
-            &old_slots_[gi * kWidth + detail::Ctzb(m)]);
+            &old_slots_[gi * kWidth + Group::Lane(m)]);
         if (equal_(e->first, key)) return e;
         m &= m - 1;
       }
@@ -846,7 +974,8 @@ class flat_hash_map {
   }
 
   // Element with key, or nullptr. Never modifies the map.
-  value_type* find_ptr(const key_type& key, uint64_t h) const noexcept {
+  SFLAT_FIND_INLINE value_type* find_ptr(const key_type& key,
+                                         uint64_t h) const noexcept {
     const value_type* p =
         find_in(key, h, ctrl_, slots_, cap_, overflow_, equal_);
     if (__builtin_expect(!p && old_cap_ != 0, 0)) p = find_in_old(key, h);
@@ -871,21 +1000,21 @@ class flat_hash_map {
     const bool track_del = (deleted_ != 0);
     for (size_t k = 0; k < ng; ++k) {
       if (gi >= ng) gi -= ng;
-      detail::Group g = detail::Group::Load(ctrl_ + gi * kWidth);
-      uint32_t m = g.Match(hh);
+      Group g = Group::Load(ctrl_ + gi * kWidth);
+      Mask m = g.Match(hh);
       while (m) {
-        const unsigned j = detail::Ctzb(m);
+        const unsigned j = Group::Lane(m);
         m &= m - 1;
         const size_t idx = gi * kWidth + j;
         if (equal_(slot_at(idx)->first, key)) return {idx, true};
       }
       if (track_del && first_del == cap_) {
-        const uint32_t md = g.Match(detail::kDeleted);
-        if (md) first_del = gi * kWidth + detail::Ctzb(md);
+        const Mask md = g.Match(detail::kDeleted);
+        if (md) first_del = gi * kWidth + Group::Lane(md);
       }
-      const uint32_t me = g.Match(detail::kEmpty);
+      const Mask me = g.Match(detail::kEmpty);
       if (me) {
-        size_t idx = gi * kWidth + detail::Ctzb(me);
+        size_t idx = gi * kWidth + Group::Lane(me);
         if (first_del != cap_) idx = first_del;
         // If the key lands past its home group, mark the home group so that
         // finds can early-out on a miss after checking just the home group.
@@ -908,11 +1037,11 @@ class flat_hash_map {
     const size_t home = detail::Fastrange(h, ng);
     if (home * kWidth < mig_pos_) return old_cap_;
     for (size_t gi = home; gi < ng; ++gi) {  // no wrap: stay ahead of front
-      const uint32_t me =
-          detail::Group::Load(old_ctrl_ + gi * kWidth).Match(detail::kEmpty);
+      const Mask me =
+          Group::Load(old_ctrl_ + gi * kWidth).Match(detail::kEmpty);
       if (me) {
         if (gi != home) old_overflow_[home] |= detail::OverflowBit(h);
-        return gi * kWidth + detail::Ctzb(me);
+        return gi * kWidth + Group::Lane(me);
       }
     }
     return old_cap_;
@@ -951,16 +1080,16 @@ class flat_hash_map {
       // proves that the key is absent; tombstones do not matter here.)
       const uint8_t hh = detail::H2(h);
       const size_t home = detail::Fastrange(h, cap_ / kWidth);
-      const detail::Group g = detail::Group::Load(ctrl_ + home * kWidth);
-      uint32_t m = g.Match(hh);
+      const Group g = Group::Load(ctrl_ + home * kWidth);
+      Mask m = g.Match(hh);
       while (m) {
-        value_type* e = cur_slot(home * kWidth + detail::Ctzb(m));
+        value_type* e = cur_slot(home * kWidth + Group::Lane(m));
         if (equal_(e->first, key)) return {iterator(this, e), false};
         m &= m - 1;
       }
-      const uint32_t me = g.Match(detail::kEmpty);
+      const Mask me = g.Match(detail::kEmpty);
       if (me) {
-        const size_t idx = home * kWidth + detail::Ctzb(me);
+        const size_t idx = home * kWidth + Group::Lane(me);
         value_type* e = cur_slot(idx);
         construct(static_cast<void*>(e));
         ctrl_[idx] = hh;
@@ -988,10 +1117,10 @@ class flat_hash_map {
     size_t gi = home;
     for (size_t k = 0; k < ng; ++k) {
       if (gi >= ng) gi -= ng;
-      detail::Group g = detail::Group::Load(ctrl_ + gi * kWidth);
-      const uint32_t me = g.Match(detail::kEmpty);
+      Group g = Group::Load(ctrl_ + gi * kWidth);
+      const Mask me = g.Match(detail::kEmpty);
       if (me) {
-        const size_t dst = gi * kWidth + detail::Ctzb(me);
+        const size_t dst = gi * kWidth + Group::Lane(me);
         if (dst / kWidth != home) overflow_[home] |= detail::OverflowBit(h);
         return dst;
       }
@@ -1128,9 +1257,9 @@ class flat_hash_map {
     // Fast path: an empty slot in the home group (the new table is at most
     // ~60% full during a migration).
     const size_t home = detail::Fastrange(h, cap_ / kWidth);
-    const uint32_t me =
-        detail::Group::Load(ctrl_ + home * kWidth).Match(detail::kEmpty);
-    const size_t dst = me ? home * kWidth + detail::Ctzb(me) : find_empty(h);
+    const Mask me =
+        Group::Load(ctrl_ + home * kWidth).Match(detail::kEmpty);
+    const size_t dst = me ? home * kWidth + Group::Lane(me) : find_empty(h);
     ::new (static_cast<void*>(&slots_[dst])) value_type(std::move(*s));
     s->~value_type();
     ctrl_[dst] = detail::H2(h);
@@ -1141,15 +1270,14 @@ class flat_hash_map {
   // huge pages in the new table up to just ahead of the front.
   void migrate_step(size_t batch = kMigrateBatch) {
     if (!is_migrating()) return;
-    constexpr uint32_t kAll =
-        static_cast<uint32_t>((uint64_t{1} << kWidth) - 1);
     const size_t stop = old_cap_ - mig_pos_ > batch ? mig_pos_ + batch : old_cap_;
     for (; mig_pos_ < stop; mig_pos_ += kWidth) {
       uint8_t* oc = old_ctrl_ + mig_pos_;
-      const detail::Group g = detail::Group::Load(oc);
-      uint32_t full = ~(g.Match(detail::kEmpty) | g.Match(detail::kDeleted)) & kAll;
+      const Group g = Group::Load(oc);
+      Mask full =
+          ~(g.Match(detail::kEmpty) | g.Match(detail::kDeleted)) & Group::kAll;
       while (full) {
-        migrate_one(mig_pos_ + detail::Ctzb(full));
+        migrate_one(mig_pos_ + Group::Lane(full));
         full &= full - 1;
       }
       // Mark the whole group deleted (not empty): finds that probe through it
@@ -1244,10 +1372,10 @@ class flat_hash_map {
           size_t dst = new_cap;
           for (size_t k = 0; k < new_ng; ++k) {
             if (gi >= new_ng) gi -= new_ng;
-            detail::Group g = detail::Group::Load(new_ctrl + gi * kWidth);
-            const uint32_t me = g.Match(detail::kEmpty);
+            Group g = Group::Load(new_ctrl + gi * kWidth);
+            const Mask me = g.Match(detail::kEmpty);
             if (me) {
-              dst = gi * kWidth + detail::Ctzb(me);
+              dst = gi * kWidth + Group::Lane(me);
               break;
             }
             ++gi;
@@ -1453,11 +1581,11 @@ class flat_hash_map {
   // ------------------------------------------------------------------ lookup
   // find() never changes the map, also during a migration. Concurrent finds
   // from many threads are safe while no thread writes.
-  iterator find(const key_type& key) {
+  SFLAT_FIND_INLINE iterator find(const key_type& key) {
     return iterator(this, find_ptr(key, hash_mixed(key)));
   }
 
-  const_iterator find(const key_type& key) const {
+  SFLAT_FIND_INLINE const_iterator find(const key_type& key) const {
     return const_iterator(this, find_ptr(key, hash_mixed(key)));
   }
 

@@ -35,6 +35,11 @@ Compile with this command:
 
 `g++ -std=c++17 -O3 -march=native -I include your_file.cpp`
 
+On ARM (for example Apple Silicon) NEON is part of the base AArch64 ISA, so
+no flag is needed. `-mcpu=native` is fine too:
+
+`clang++ -std=c++17 -O3 -mcpu=native -I include your_file.cpp`
+
 ## Design
 
 ### Memory layout
@@ -46,14 +51,14 @@ The map has three arrays.
 - **ctrl**: a control array with one byte per slot. The style follows
   SwissTable. `0xFF` means empty. `0xFE` means deleted. Values in
   `[0, 0xFD]` hold the 8-bit hash fingerprint (H2).
-- **overflow**: one byte per 32 slots. Each byte is a Bloom filter. See
-  below.
+- **overflow**: one byte per group (32 slots with AVX2, 16 with SSE2 and
+  NEON). Each byte is a Bloom filter. See below.
 
 ### Capacity and growth
 
 - The capacity is always a multiple of the SIMD group width. The width is
-  32 with AVX2 and 16 with SSE2. The capacity does not need to be a power
-  of two.
+  32 with AVX2, 16 with SSE2 and NEON, and 8 with the portable fallback.
+  The capacity does not need to be a power of two.
 - The map uses 32-bit Lemire fastrange for positioning:
   `(n * (h >> 32)) >> 32`. This is one `IMUL r32` instruction (1 uop). It
   is about 5 times faster than 128-bit multiplication. It does not need a
@@ -86,7 +91,8 @@ Memory formula for `uint64_t -> uint64_t`:
 bytes/entry = (16 + 1 + 1/32) / 0.875 = about 19.5
 ```
 The measured value is 19.5 to 21.6 bytes/entry. The difference is allocator
-overhead.
+overhead. With 16-byte groups (SSE2, NEON) the overflow term is 1/16, which
+adds about 0.04 bytes/entry.
 
 ### Growth memory (Linux)
 
@@ -141,8 +147,15 @@ Configuration macros (define before the include):
 | `SFLAT_USE_THP` | 1 | 0: keep `mmap` and page release, but give no huge page hints. |
 | `SFLAT_GROW_2X_BELOW` | 2 GiB | Tables smaller than this many bytes grow 2x. |
 | `SFLAT_GROW_1_5X_BELOW` | 10 GiB | Tables smaller than this grow 1.5x; larger tables grow 1.25x. |
+| `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
+| `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
 
 A custom allocator disables both. The map then uses only the allocator.
+
+On macOS and other non-Linux systems `SFLAT_USE_MMAP` defaults to 0: all
+arrays come from `operator new`, so there is no page release and no THP.
+Incremental growth still works (no latency spike), but the growth peak is
+old table + new table.
 
 ### Why a smaller growth factor uses less memory
 
@@ -162,9 +175,24 @@ capacity is at most 1.25x of the need.
 
 ### SIMD probing
 
-- With AVX2, each group has 32 control bytes. One `vpcmpeqb` plus one
-  `vpmovmskb` compares the H2 values.
-- Without AVX2, the code uses the SSE2 16-byte group path.
+The back end is chosen at compile time:
+
+| Back end | When | Group | Match |
+|----------|------|-------|-------|
+| AVX2 | x86-64 with `__AVX2__` | 32 bytes | `vpcmpeqb` + `vpmovmskb`, 1 bit per lane |
+| SSE2 | other x86-64 | 16 bytes | `pcmpeqb` + `pmovmskb`, 1 bit per lane |
+| NEON | ARM with NEON (AArch64, Apple Silicon, ARMv7 + NEON), little endian | 16 bytes | `cmeq` + `shrn #4` + `fmov`, 4 bits per lane |
+| SWAR | any other CPU, or `SFLAT_NO_SIMD=1` | 8 bytes | exact zero-byte test on a `uint64_t`, 8 bits per lane |
+
+- NEON has no `movemask` instruction. The map narrows the 16-byte compare
+  result with `shrn` (shift right by 4 and narrow each 16-bit pair) to a
+  64-bit value with 4 bits per lane, and moves it to a general register.
+  Masking with `0x8888...` keeps one bit per lane, so the usual
+  `m &= m - 1` loop works and the lane index is `ctz(m) / 4`. With
+  `-O3` a match is `dup`, `cmeq`, `shrn`, `fmov`, `and` (the `dup` is
+  hoisted out of loops for the empty and deleted values).
+- The probe loops use `Group::Mask`, `Group::Lane()` and `Group::kAll`, so
+  the code is the same for all back ends.
 - Probing is linear by group.
 
 ### Hash strategy
@@ -215,8 +243,9 @@ Limits (common trade-offs of open addressing):
 - Capacity limit: fewer than 2^32 groups, because the position function
   (Fastrange) is 32-bit. With AVX2 (32 slots per group) this is about 137
   billion slots, or 120 billion entries at the 0.875 load factor. With SSE2
-  it is half. `max_size()` returns the limit. Above it, `insert`,
-  `reserve` and `rehash` throw `std::length_error`.
+  and NEON it is half, and with SWAR a quarter. `max_size()` returns the
+  limit. Above it, `insert`, `reserve` and `rehash` throw
+  `std::length_error`.
 
 ### Steady-state optimization
 
@@ -241,15 +270,18 @@ benefit grows with table size.
 
 ## Benchmark
 
-The benchmark has been run on two machines:
+The benchmark has been run on three machines:
 
 - [Intel Xeon (Emerald Rapids), KVM virtual machine](#intel-xeon-emerald-rapids-kvm-virtual-machine):
   AVX2 path, large L3 cache, 1M to 100M entries.
 - [Intel Celeron N5105, bare metal](#intel-celeron-n5105-bare-metal):
   SSE2 path (no AVX2), small caches and TLB, 1M to 50M entries.
+- [Apple M2, MacBook Air (macOS)](#apple-m2-macbook-air-macos):
+  NEON path (ARM), 128-byte cache lines, 16 KiB pages, 1M to 100M entries.
 
-Both use the same program (`bench/bench.cpp`) and the same versions of the
-comparison maps.
+All use the same program (`bench/bench.cpp`). The Xeon and the Celeron use
+the same versions of the comparison maps; the M2 uses the versions listed
+in its section.
 
 ### Intel Xeon (Emerald Rapids), KVM virtual machine
 
@@ -552,6 +584,150 @@ slower), there is no THP penalty on this bare-metal machine, even at 1M.
 - **SSE2 only**: this CPU has no AVX2, so sflat probes 16-slot groups. The
   results show that the SSE2 path is competitive.
 
+### Apple M2, MacBook Air (macOS)
+
+#### Test environment
+
+| Item | Value |
+|------|-------|
+| Machine | MacBook Air (Mac14,2), fanless, on AC power |
+| CPU | Apple M2, 8 cores (4 performance, 4 efficiency) |
+| ISA | ARMv8.6-A, NEON (sflat uses the NEON x16 back end) |
+| Cache | P cores: L1d 128 KiB per core, L2 16 MiB shared. E cores: L1d 64 KiB, L2 4 MiB. 128-byte cache lines |
+| Memory | 16 GiB LPDDR5 (unified), 16 KiB pages |
+| OS | macOS 26.6.2 (25G83) |
+| Compiler | Apple clang 21.0.0, libc++, `-O3 -mcpu=native -std=c++17 -DNDEBUG` |
+
+- Comparison targets: emhash8 (upstream commit 801d02a),
+  boost::unordered_flat_map and boost::unordered_map (Boost 1.86.0),
+  absl::flat_hash_map and absl::node_hash_map (Abseil 20260107.1 from
+  Homebrew), std::unordered_map (libc++). All use the macOS system malloc.
+- Same program and method as on the Xeon (`bench/bench.cpp`). On macOS
+  `ru_maxrss` is in bytes; the benchmark converts it.
+- 1M and 10M: median of 3 runs. 100M: 1 run.
+- The process is not pinned to a core type. macOS runs it on the
+  performance cores while they are free.
+
+Build command (Abseil from Homebrew):
+
+```bash
+A=$(brew --prefix abseil)
+clang++ -std=c++17 -O3 -mcpu=native -DNDEBUG -DHAS_ABSL \
+  -I include -I thirdparty/emhash/include -I thirdparty/boost/include \
+  -I $A/include bench/bench.cpp -L$A/lib \
+  -labsl_hash -labsl_city -labsl_raw_hash_set -labsl_hashtablez_sampler \
+  -o bench_m2
+./bench_m2 1000000 10000000 100000000
+```
+
+#### Results
+
+Lower is better. **Bold** is the best value in the row. The rows mean the
+same as in the Xeon results.
+
+**n = 1,000,000**
+
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | 10.8 | 20.1 | **7.7** | 35.5 | 16.1 | 25.6 | 43.7 |
+| find hit (insert order) | 8.4 | **4.8** | 7.0 | 13.1 | 6.7 | 5.9 | 15.0 |
+| find hit (random order) | 6.3 | 9.3 | 6.3 | 18.3 | **6.0** | 10.6 | 21.1 |
+| find miss | 13.5 | 7.4 | **2.4** | 16.9 | 3.2 | 3.9 | 30.6 |
+| erase | 9.8 | 10.9 | **9.2** | 46.9 | 14.7 | 28.1 | 88.5 |
+| iterate | 7.9 | **0.2** | 8.0 | 10.2 | 6.5 | 7.4 | 8.9 |
+| insert (no reserve) | 24.7 | 41.0 | **19.8** | 61.8 | 21.1 | 33.5 | 84.4 |
+| bytes/entry (steady) | **19.6** | 32.9 | 33.6 | 45.6 | 35.7 | 35.0 | 40.2 |
+| bytes/entry (growth peak) | 67.4 | 75.5 | 67.3 | 58.3 | 71.6 | **54.1** | 58.7 |
+
+**n = 10,000,000**
+
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | 15.6 | 35.8 | **11.9** | 69.2 | 18.3 | 32.4 | 89.6 |
+| find hit (insert order) | 18.0 | 11.3 | 11.5 | 23.3 | **9.3** | 10.0 | 24.1 |
+| find hit (random order) | 18.4 | 15.1 | 11.9 | 29.6 | **9.4** | 17.5 | 31.7 |
+| find miss | 15.8 | 11.0 | **4.7** | 26.5 | 6.9 | 9.0 | 46.8 |
+| erase | 27.3 | 27.1 | **16.8** | 92.9 | 24.8 | 56.8 | 164.2 |
+| iterate | 7.6 | **0.3** | 7.6 | 13.1 | 6.3 | 7.5 | 17.2 |
+| insert (no reserve) | 26.6 | 63.4 | **20.6** | 106.1 | 23.8 | 48.1 | 185.3 |
+| bytes/entry (steady) | **19.5** | 29.4 | 26.9 | 42.9 | 28.5 | 31.2 | 40.2 |
+| bytes/entry (growth peak) | 53.7 | 64.3 | 53.7 | 52.4 | 57.1 | **46.3** | 53.3 |
+
+**n = 100,000,000**
+
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | 31.8 | 43.3 | **23.4** | 85.8 | 29.2 | 54.1 | 98.8 |
+| find hit (insert order) | 21.2 | 14.2 | 14.4 | 30.1 | **12.8** | 13.9 | 25.9 |
+| find hit (random order) | 22.3 | 17.4 | 15.0 | 36.6 | **13.2** | 20.4 | 33.8 |
+| find miss | 27.1 | 12.5 | **10.5** | 34.4 | 15.7 | 17.0 | 50.0 |
+| erase | 35.3 | 32.3 | **21.9** | 103.8 | 34.0 | 76.6 | 176.3 |
+| iterate | 7.8 | **0.3** | 7.4 | 13.7 | 6.3 | 7.4 | 18.8 |
+| insert (no reserve) | 50.3 | 80.9 | **29.6** | 124.8 | 49.9 | 69.2 | 210.2 |
+| bytes/entry (steady) | **19.5** | 26.8 | 21.5 | 40.7 | 22.8 | 28.2 | 40.1 |
+| bytes/entry (growth peak) | 43.0 | 48.2 | 43.0 | 48.3 | 45.7 | **40.2** | 49.0 |
+
+About the growth peak on macOS: the macOS malloc keeps large freed blocks
+mapped and dirty in the process for reuse. So the old tables of a growing
+map stay in the peak RSS (and in the physical footprint, which was checked
+too) after the map frees them. This makes the growth peak about 2x the final
+table for every map. sflat has no mmap path on macOS (see "Growth memory"),
+so its page release does not help here. The steady-state row is not
+affected.
+
+#### NEON compared with SWAR
+
+sflat only, ns/op, median of 3 runs. "NEON match" is the NEON group
+without the find tuning below. "NEON" is the default build.
+
+| Operation | n | SWAR x8 | NEON match x16 | NEON (default) |
+|---|---|---|---|---|
+| insert (reserved) | 1M | 13.0 | 12.4 | **10.8** |
+| find hit (random order) | 1M | 7.3 | 8.5 | **6.3** |
+| find miss | 1M | **11.0** | 14.4 | 13.5 |
+| erase | 1M | 12.0 | 12.9 | **9.8** |
+| insert (reserved) | 10M | 16.7 | 16.3 | **15.6** |
+| find hit (random order) | 10M | 23.5 | 24.5 | **18.4** |
+| find miss | 10M | **13.1** | 15.6 | 15.8 |
+| erase | 10M | 32.2 | 33.4 | **27.3** |
+
+- The NEON match alone is about as fast as the portable SWAR group: on the
+  M2 the find cost is memory latency, not the compare. SWAR is even faster
+  for misses.
+- Two changes for NEON builds make finds 20 to 35 percent faster on the M2
+  (microbenchmark, random-order hits: 1M 11.2 to 8.7 ns, 10M 23.1 to 15.6
+  ns, 100M 29.3 to 19.1 ns):
+  - `find()` is forced inline. Clang did not inline it, and the call cost
+    13 to 19 percent at 10M entries.
+  - `SFLAT_PREFETCH_SLOTS=1`: `find()` prefetches the home group's slots
+    (up to 256 bytes) before it reads the control bytes. The control byte
+    miss and the slot miss then overlap instead of running one after the
+    other. Misses do not need the slots: they are up to 16 percent slower
+    than with the inlining alone (about the same as before both changes).
+    Define `SFLAT_PREFETCH_SLOTS=0` for a miss-heavy workload.
+- Both are on only for NEON. On x86-64 they were not measured, so the x86
+  build is the same as before.
+
+#### Assessment (M2)
+
+- **memory (steady state)**: sflat uses the least memory at all sizes
+  (19.5 to 19.6 bytes/entry): 9 to 42 percent less than boost_flat, 14 to
+  45 percent less than absl_flat, and 27 to 40 percent less than emhash8.
+- **memory (growth peak)**: equal to boost_flat at all sizes. All maps
+  pay for the macOS malloc cache (see above).
+- **insert**: boost_flat is the fastest. sflat is second or third for
+  reserved inserts and 1.2 to 1.7 times slower than boost_flat without
+  reserve.
+- **find hit**: at 1M sflat is equal to boost_flat. At 10M and 100M it is
+  1.5 to 2.0 times slower than absl_flat and boost_flat. This differs from
+  the x86-64 machines: sflat was the fastest at 100M on the Xeon and at
+  all sizes on the Celeron. The cause is not known yet (load factor and
+  cache line alignment were ruled out: 0.5 and 128-byte alignment gave the
+  same times). This needs more work.
+- **find miss**: boost_flat is 2.6 to 5.6 times faster, for the same
+  reason as on the x86-64 machines (load factor 0.875, so the overflow bits
+  are often set).
+
 ### Large-scale estimates (not measured)
 
 The table below extrapolates from the measured steady-state bytes/entry.
@@ -583,8 +759,21 @@ The tests include: randomized mixed operations against
 iterator erase, reserve and rehash, operations during a migration, large
 tables on the mmap and THP path, the capacity limit, and growth factor
 checks. `growth_tiers.cpp` sets small tier limits and checks the 2x, 1.5x
-and 1.25x steps. All tests also pass with `-mno-avx2` (SSE2 path) and with
-ASan and UBSan.
+and 1.25x steps. `test_group_match` checks the SIMD back end against a
+scalar reference for every lane and every byte value.
+
+All tests pass on each back end:
+
+| Back end | How it was tested |
+|----------|-------------------|
+| AVX2 | x86-64 Linux, `-march=native`; also `clang++ -arch x86_64 -mavx2` under Rosetta 2 on Apple M2 |
+| SSE2 | `-mno-avx2` on x86-64 Linux; `clang++ -arch x86_64` under Rosetta 2 |
+| NEON | Apple M2, macOS 26.6, Apple clang 21 |
+| SWAR | Apple M2 with `-DSFLAT_NO_SIMD=1` |
+
+NEON and SWAR also pass with ASan and UBSan on the M2. (The x86 paths were
+checked with ASan and UBSan on Linux before the NEON change; this change was
+not re-run there.)
 
 ## License
 

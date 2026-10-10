@@ -236,7 +236,11 @@ long run_child(void (*fn)(size_t), size_t n) {
   memset(&ru, 0, sizeof(ru));
   while (wait4(pid, &status, 0, &ru) < 0) {
   }
+#if defined(__APPLE__)
+  return ru.ru_maxrss / 1024;  // bytes on macOS
+#else
   return ru.ru_maxrss;  // KiB on Linux
+#endif
 }
 
 // ---- maps under test --------------------------------------------------------
@@ -273,7 +277,17 @@ int main(int argc, char** argv) {
 
   std::printf("# maps:");
   for (const Entry& e : kMaps) std::printf(" %s", e.name);
-  std::printf("\n# cpu: x86-64, flags: -O3 -march=native -std=c++17\n");
+#if defined(SFLAT_SIMD_AVX2)
+  const char* simd = "AVX2";
+#elif defined(SFLAT_SIMD_SSE2)
+  const char* simd = "SSE2";
+#elif defined(SFLAT_SIMD_NEON)
+  const char* simd = "NEON";
+#else
+  const char* simd = "SWAR";
+#endif
+  std::printf("\n# sflat group: %s x%zu, flags: -O3 -std=c++17\n", simd,
+              sflat::detail::Group::kWidth);
   std::printf("# times are ns/op; memory is child peak RSS minus baseline\n\n");
 
   for (size_t n : sizes) {
