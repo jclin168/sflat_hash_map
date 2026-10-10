@@ -95,7 +95,7 @@ With `std::allocator` on Linux, each array of 2 MiB or more gets its own
 alignment, so a control group never crosses two cache lines.
 
 A plain incremental rehash keeps the full old table (1x) and the full new
-table (1.5x) alive until the migration ends. The map avoids this peak in
+table (1.25x to 2x) alive until the migration ends. The map avoids this peak in
 three steps:
 
 1. **Ordered migration.** Fastrange is monotonic in the hash. A key at
