@@ -22,8 +22,8 @@
 //
 // Layout: one control byte per slot (SwissTable-style: H2 in [0,0xFD],
 // 0xFF = empty, 0xFE = deleted) stored in a dense array, a separate slot array
-// (std::pair<const Key, T> in aligned raw storage), and one overflow byte per
-// group.
+// (std::pair<const Key, T> in aligned raw storage), and one 16-bit overflow
+// word per group.
 
 #include <cassert>
 #include <cstddef>
@@ -136,9 +136,12 @@ inline size_t Fastrange(uint64_t h, size_t n) noexcept {
 // Per-group overflow Bloom bit: when a key's home group is full and the key
 // spills to a later group, set this bit on the home group. Find can then
 // terminate a miss after the home group if the bit is clear.
-// Uses hash bits [8,11), disjoint from H2 bits [0,8) and position bits [32,64).
-inline uint8_t OverflowBit(uint64_t h) noexcept {
-  return static_cast<uint8_t>(1u << ((h >> 8) & 7u));
+// 16 bits per group: a 32-slot group at 0.875 load often spills, and 8 bits
+// fill up fast (a miss then probes the next group).
+// Uses hash bits [8,12), disjoint from H2 bits [0,8) and position bits [32,64).
+using OverflowWord = uint16_t;
+inline OverflowWord OverflowBit(uint64_t h) noexcept {
+  return static_cast<OverflowWord>(1u << ((h >> 8) & 15u));
 }
 
 inline unsigned Ctzb(uint32_t x) noexcept {
@@ -772,7 +775,7 @@ class flat_hash_map {
   // have ctrl == empty_ctrl().
   static const value_type* find_in(const key_type& key, uint64_t h,
                                    const uint8_t* ctrl, const slot_type* slots,
-                                   size_t cap, const uint8_t* overflow,
+                                   size_t cap, const detail::OverflowWord* overflow,
                                    const KeyEqual& equal) noexcept {
     const uint8_t hh = detail::H2(h);
     const size_t ng = cap / kWidth;
@@ -1085,6 +1088,31 @@ class flat_hash_map {
     else if (p)
       ctrl_traits::deallocate(ctrl_alloc_, p, n);
   }
+  // Zeroed overflow words for ng groups.
+  using ovf_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<
+      detail::OverflowWord>;
+  using ovf_traits = std::allocator_traits<ovf_alloc>;
+  detail::OverflowWord* alloc_overflow(size_t ng) {
+    const size_t n = ng * sizeof(detail::OverflowWord);
+    detail::OverflowWord* p;
+    if constexpr (kOwnMemory) {
+      p = static_cast<detail::OverflowWord*>(
+          detail::PageAlloc(n, detail::kCacheLine, true));
+    } else {
+      ovf_alloc a(ctrl_alloc_);
+      p = ovf_traits::allocate(a, ng);
+    }
+    std::memset(p, 0, n);
+    return p;
+  }
+  void free_overflow(detail::OverflowWord* p, size_t ng) noexcept {
+    if constexpr (kOwnMemory) {
+      detail::PageFree(p, ng * sizeof(detail::OverflowWord), detail::kCacheLine);
+    } else if (p) {
+      ovf_alloc a(ctrl_alloc_);
+      ovf_traits::deallocate(a, p, ng);
+    }
+  }
 
   // ------------------------------------------------------------ growth
   // Start incremental migration to a new table. The old table is kept and
@@ -1100,8 +1128,7 @@ class flat_hash_map {
     uint8_t* new_ctrl = alloc_bytes(new_cap);
     std::memset(new_ctrl, detail::kEmpty, new_cap);
     const size_t new_ng = new_cap / kWidth;
-    uint8_t* new_overflow = alloc_bytes(new_ng);
-    std::memset(new_overflow, 0, new_ng);
+    detail::OverflowWord* new_overflow = alloc_overflow(new_ng);
     // Move current to old.
     old_slots_ = slots_;
     old_ctrl_ = ctrl_;
@@ -1224,14 +1251,13 @@ class flat_hash_map {
     new_cap = align_cap(new_cap);
     slot_type* new_slots = nullptr;
     uint8_t* new_ctrl = empty_ctrl();
-    uint8_t* new_overflow = nullptr;
+    detail::OverflowWord* new_overflow = nullptr;
     if (new_cap) {
       new_slots = alloc_slots(new_cap, true);
       new_ctrl = alloc_bytes(new_cap);
       std::memset(new_ctrl, detail::kEmpty, new_cap);
       const size_t new_ng = new_cap / kWidth;
-      new_overflow = alloc_bytes(new_ng);
-      std::memset(new_overflow, 0, new_ng);
+      new_overflow = alloc_overflow(new_ng);
       constexpr size_t sz = sizeof(slot_type);
       size_t released = 0;
       for (size_t i = 0; i < cap_; ++i) {
@@ -1282,7 +1308,7 @@ class flat_hash_map {
     if (cap_) {
       free_slots(slots_, cap_);
       free_bytes(ctrl_, cap_);
-      free_bytes(overflow_, cap_ / kWidth);
+      free_overflow(overflow_, cap_ / kWidth);
     }
     free_old();
   }
@@ -1291,7 +1317,7 @@ class flat_hash_map {
     if (old_cap_) {
       free_slots(old_slots_, old_cap_);
       free_bytes(old_ctrl_, old_cap_);
-      free_bytes(old_overflow_, old_cap_ / kWidth);
+      free_overflow(old_overflow_, old_cap_ / kWidth);
       old_slots_ = nullptr;
       old_ctrl_ = nullptr;
       old_overflow_ = nullptr;
@@ -1310,7 +1336,7 @@ class flat_hash_map {
     free_old();
     if (cap_) {
       std::memset(ctrl_, detail::kEmpty, cap_);
-      std::memset(overflow_, 0, cap_ / kWidth);
+      std::memset(overflow_, 0, cap_ / kWidth * sizeof(detail::OverflowWord));
     }
     size_ = 0;
     deleted_ = 0;
@@ -1630,7 +1656,7 @@ class flat_hash_map {
   // ------------------------------------------------------------------- data
   slot_type* slots_ = nullptr;
   uint8_t* ctrl_ = empty_ctrl();  // size cap_; H2 / kEmpty / kDeleted
-  uint8_t* overflow_ = nullptr;  // size cap_/kWidth; per-group overflow Bloom bits
+  detail::OverflowWord* overflow_ = nullptr;  // size cap_/kWidth; Bloom bits
   size_type cap_ = 0;
   size_type size_ = 0;
   size_type deleted_ = 0;  // tombstones in the current table
@@ -1645,7 +1671,7 @@ class flat_hash_map {
   // in small steps to avoid latency spikes.
   slot_type* old_slots_ = nullptr;
   uint8_t* old_ctrl_ = nullptr;
-  uint8_t* old_overflow_ = nullptr;
+  detail::OverflowWord* old_overflow_ = nullptr;
   size_type old_cap_ = 0;
   size_type mig_pos_ = 0;       // next old slot to migrate
   size_type old_released_ = 0;  // old slot bytes given back to the kernel

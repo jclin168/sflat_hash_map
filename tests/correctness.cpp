@@ -437,6 +437,60 @@ void test_large_mixed() {
               migrating_checks);
 }
 
+// A user allocator makes the map use it for all arrays (no mmap path).
+// It counts live bytes, so a leak or a size mismatch shows up.
+static long long g_live_bytes = 0;
+template <typename T>
+struct CountingAlloc {
+  using value_type = T;
+  CountingAlloc() = default;
+  template <typename U>
+  CountingAlloc(const CountingAlloc<U>&) noexcept {}
+  T* allocate(size_t n) {
+    g_live_bytes += static_cast<long long>(n * sizeof(T));
+    return std::allocator<T>().allocate(n);
+  }
+  void deallocate(T* p, size_t n) noexcept {
+    g_live_bytes -= static_cast<long long>(n * sizeof(T));
+    std::allocator<T>().deallocate(p, n);
+  }
+  template <typename U>
+  bool operator==(const CountingAlloc<U>&) const noexcept { return true; }
+  template <typename U>
+  bool operator!=(const CountingAlloc<U>&) const noexcept { return false; }
+};
+
+void test_custom_allocator() {
+  {
+    using A = CountingAlloc<std::pair<const uint64_t, uint64_t>>;
+    sflat::flat_hash_map<uint64_t, uint64_t, std::hash<uint64_t>,
+                         std::equal_to<uint64_t>, A>
+        m;
+    std::unordered_map<uint64_t, uint64_t> ref;
+    std::mt19937_64 rng(7);
+    for (int i = 0; i < 200000; ++i) {
+      const uint64_t k = rng() % 150000;
+      if (rng() % 4 == 0) {
+        CHECK(m.erase(k) == ref.erase(k));
+      } else {
+        m[k] = i;
+        ref[k] = i;
+      }
+    }
+    CHECK(m.size() == ref.size());
+    for (const auto& kv : ref) {
+      auto it = m.find(kv.first);
+      CHECK(it != m.end() && it->second == kv.second);
+    }
+    for (uint64_t k = 150000; k < 160000; ++k) CHECK(m.find(k) == m.end());
+    CHECK(g_live_bytes > 0);
+    m.clear();
+    CHECK(m.empty());
+  }
+  CHECK(g_live_bytes == 0);
+  std::printf("test_custom_allocator OK\n");
+}
+
 int main() {
   test_api_surface();
   test_random_ops();
@@ -445,6 +499,7 @@ int main() {
   test_sequential_keys();
   test_during_migration();
   test_large_mixed();
+  test_custom_allocator();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
   return 0;
 }

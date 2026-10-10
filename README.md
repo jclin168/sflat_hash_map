@@ -46,8 +46,8 @@ The map has three arrays.
 - **ctrl**: a control array with one byte per slot. The style follows
   SwissTable. `0xFF` means empty. `0xFE` means deleted. Values in
   `[0, 0xFD]` hold the 8-bit hash fingerprint (H2).
-- **overflow**: one byte per 32 slots. Each byte is a Bloom filter. See
-  below.
+- **overflow**: one 16-bit word per group (2 bytes per 32 slots). Each
+  word is a Bloom filter. See below.
 
 ### Capacity and growth
 
@@ -83,7 +83,7 @@ The map has three arrays.
 
 Memory formula for `uint64_t -> uint64_t`:
 ```
-bytes/entry = (16 + 1 + 1/32) / 0.875 = about 19.5
+bytes/entry = (16 + 1 + 2/32) / 0.875 = about 19.5
 ```
 The measured value is 19.5 to 20.7 bytes/entry. The difference is allocator
 overhead.
@@ -122,7 +122,7 @@ index order and release the old slots behind the cursor.
 Large tables cause many TLB misses with 4 KiB pages. The map asks for huge
 pages with `madvise(MADV_HUGEPAGE)`:
 
-- control bytes, overflow bytes, and slots after `reserve()`: at once;
+- control bytes, overflow words, and slots after `reserve()`: at once;
 - slots of a growing table: a 2 MiB page just ahead of the migration front.
   Pages far ahead of the front stay `MADV_NOHUGEPAGE`, so a rare stray write
   does not commit a full 2 MiB page;
@@ -176,17 +176,24 @@ The map processes the hash in three steps.
    This is one 128-bit multiplication. It spreads weak hashes well, for
    example the identity hash of sequential integers.
 3. It uses the high 32 bits of the mixed hash for fastrange positioning.
-   It uses the low 8 bits for H2. It uses bits [8, 11) for the overflow bit.
+   It uses the low 8 bits for H2. It uses bits [8, 12) for the overflow bit.
    The three parts do not overlap. This reduces correlation.
 
-### Overflow byte (fast miss)
+### Overflow word (fast miss)
 
-Each group has a one-byte Bloom filter. When a key overflows from its home
+Each group has a 16-bit Bloom filter. When a key overflows from its home
 group to a later group because the home group is full, the map sets a bit
 in the home group. When `find` does not locate the key in the home group,
 it checks the bit. If the bit is clear, `find` returns a miss at once. It
 does not scan further. This technique comes from `boost::unordered_flat_map`.
 It improves miss speed by about 33 percent.
+
+boost uses 8 bits for 15 slots. sflat groups have 32 slots (AVX2), so 8 bits
+fill up fast. At load 0.875 one miss in three finds its home group full.
+With 8 bits, 72 percent of these misses found the bit set and probed the
+next group. With 16 bits, the extra groups per miss go from 0.24 to 0.14
+and a miss is 5 to 8 percent faster (1M and 10M, after `reserve`). Insert
+and find hit do not change. The cost is one more byte per 32 slots.
 
 `erase` does not clear overflow bits. This is conservative and correct.
 Rehash rebuilds the bits.
