@@ -233,14 +233,17 @@ benefit grows with table size.
 - Compiler: g++ 13.3.0 with `-O3 -march=native -std=c++17`.
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
+  absl::flat_hash_map and absl::node_hash_map (Abseil LTS 20260817.0),
   std::unordered_map (libstdc++ 13). They use glibc malloc without THP.
+- All maps are compiled with `-DNDEBUG`, so no debug asserts run.
 - Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
   child process. Memory is the child peak RSS minus the baseline (the input
   arrays only).
 - Before each size, a warm-up child touches and frees memory. In a VM the
   host backs guest memory on first use, which is very slow. Without the
   warm-up, the first map in the run order pays this cost.
-- 1M and 10M: median of 3 runs. 100M: 1 run.
+- 1M and 10M: median of 3 runs. 100M: 1 run, from an earlier run without
+  Abseil and without `-DNDEBUG`.
 
 ### Results
 
@@ -256,33 +259,37 @@ value in the row.
 
 **n = 1,000,000**
 
-| Operation | sflat | emhash8 | boost_flat | boost_node | std |
-|-----------|-------|---------|------------|------------|-----|
-| insert (reserved) | 31.4 | 37.3 | **29.9** | 95.4 | 141.7 |
-| find hit (insert order) | 11.8 | **9.2** | 11.2 | 21.9 | 31.5 |
-| find hit (random order) | 12.2 | 13.5 | **10.5** | 25.6 | 32.2 |
-| find miss | 15.0 | 12.8 | **5.9** | 24.4 | 39.9 |
-| erase | 16.9 | 22.8 | **14.4** | 54.3 | 82.7 |
-| iterate | 11.6 | **0.5** | 10.1 | 16.6 | 29.4 |
-| insert (no reserve) | 64.1 | 90.1 | **56.9** | 162.7 | 180.4 |
-| bytes/entry (steady) | **21.4** | 34.0 | 34.8 | 46.7 | 41.8 |
-| bytes/entry (growth peak) | **29.4** | 36.2 | 51.2 | 46.7 | 45.2 |
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | **29.6** | 35.6 | 30.3 | 94.0 | 35.7 | 66.9 | 109.9 |
+| find hit (insert order) | 9.9 | **8.8** | 9.9 | 21.9 | 8.9 | 12.5 | 28.1 |
+| find hit (random order) | 10.9 | 12.9 | 9.9 | 21.6 | **9.0** | 19.8 | 30.3 |
+| find miss | 14.5 | 12.3 | **6.1** | 20.4 | 9.2 | 10.3 | 37.8 |
+| erase | 14.2 | 21.9 | **11.0** | 43.9 | 15.1 | 33.2 | 70.2 |
+| iterate | 12.2 | **0.5** | 10.5 | 15.2 | 11.7 | 13.8 | 24.5 |
+| insert (no reserve) | 71.1 | 86.4 | **54.8** | 139.8 | 57.1 | 88.7 | 182.3 |
+| bytes/entry (steady) | **21.3** | 34.0 | 34.8 | 46.6 | 36.9 | 52.1 | 41.8 |
+| bytes/entry (growth peak) | **29.4** | 36.0 | 51.1 | 46.6 | 54.2 | 58.3 | 45.2 |
 
 **n = 10,000,000**
 
-| Operation | sflat | emhash8 | boost_flat | boost_node | std |
-|-----------|-------|---------|------------|------------|-----|
-| insert (reserved) | 96.8 | 61.6 | **36.0** | 169.4 | 222.9 |
-| find hit (insert order) | 25.5 | **20.0** | 26.2 | 40.5 | 53.3 |
-| find hit (random order) | 31.4 | 32.7 | **27.3** | 53.7 | 70.1 |
-| find miss | 23.2 | 22.2 | **11.1** | 49.9 | 80.8 |
-| erase | 39.6 | 50.1 | **32.1** | 120.9 | 203.8 |
-| iterate | 13.1 | **1.0** | 11.5 | 30.2 | 78.2 |
-| insert (no reserve) | 166.8 | 116.4 | **56.1** | 256.3 | 372.4 |
-| bytes/entry (steady) | **19.9** | 29.5 | 27.0 | 42.8 | 40.4 |
-| bytes/entry (growth peak) | **27.3** | 29.6 | 40.4 | 42.8 | 41.9 |
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | 37.3 | 57.3 | **35.0** | 170.6 | 48.4 | 101.2 | 220.0 |
+| find hit (insert order) | 21.5 | **18.6** | 24.6 | 37.8 | 28.8 | 25.0 | 52.6 |
+| find hit (random order) | **24.9** | 31.5 | 26.4 | 54.8 | 29.6 | 43.4 | 67.8 |
+| find miss | 20.4 | 22.2 | **10.6** | 47.7 | 21.3 | 24.7 | 77.9 |
+| erase | **31.0** | 54.1 | **31.0** | 110.9 | 46.0 | 81.5 | 194.1 |
+| iterate | 12.1 | **1.0** | 11.6 | 30.5 | 10.4 | 18.3 | 78.2 |
+| insert (no reserve) | 166.1 | 118.1 | **56.9** | 235.8 | 61.0 | 133.5 | 367.7 |
+| bytes/entry (steady) | **19.9** | 29.6 | 27.0 | 42.8 | 28.6 | 47.2 | 40.4 |
+| bytes/entry (growth peak) | **27.3** | 29.6 | 40.3 | 42.8 | 42.9 | 47.2 | 41.9 |
 
-**n = 100,000,000**
+At 10M the sflat insert rows vary a lot between runs in this VM (reserved:
+37 to 90 ns, no reserve: 124 to 177 ns). The cause is the huge page faults
+(see "THP on and off" below).
+
+**n = 100,000,000** (1 run, without Abseil)
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | std |
 |-----------|-------|---------|------------|------------|-----|
@@ -329,18 +336,22 @@ THP off, define `SFLAT_USE_THP=0`.
 ### Honest assessment
 
 - **memory (steady state)**: sflat uses the least memory at all sizes: 9 to
-  38 percent less than boost_flat and 27 to 37 percent less than emhash8.
+  39 percent less than boost_flat, 30 to 42 percent less than absl_flat, and
+  27 to 37 percent less than emhash8.
 - **memory (growth peak)**: sflat now has the lowest peak at all sizes (25
   to 29 bytes/entry). Before page release it was 39 to 49.
-- **insert (reserved)**: at 100M sflat is the fastest (76.5 ns, boost_flat
-  78.5). At 1M it is within 5 percent of boost_flat. At 10M the THP faults
-  in this VM make it slow. With THP off it is 46 to 50 ns, boost_flat 36.
-- **find hit (random order)**: sflat is within 2 to 16 percent of
-  boost_flat and faster than emhash8 at all sizes.
-- **find miss**: boost_flat is still 1.6 to 2.5 times faster. sflat fills
-  the table to 0.875, so the overflow bits are often set.
-- **insert (no reserve)**: boost_flat is faster (1.1x to 3x). With 1.5x
-  growth each element moves about twice; with 2x growth about once.
+- **insert (reserved)**: sflat is the fastest at 1M (29.6 ns) and 100M
+  (76.5 ns). At 10M the median is 37.3 ns, near boost_flat (35.0), but THP
+  faults in this VM make single runs as slow as 90 ns.
+- **find hit (random order)**: sflat is the fastest at 10M (24.9 ns). At
+  1M absl_flat (9.0) and boost_flat (9.9) are faster than sflat (10.9).
+  sflat is faster than emhash8 at all sizes.
+- **find miss**: boost_flat is still 1.6 to 2.4 times faster. absl_flat
+  is faster at 1M and equal at 10M. sflat fills the table to 0.875, so the overflow
+  bits are often set.
+- **insert (no reserve)**: boost_flat and absl_flat are faster (1.2x to 3x).
+  With 1.5x growth each element moves about twice; with 2x growth about
+  once.
 - **erase and iterate**: not a goal. Both are within 1.3x of boost_flat.
 
 ### Large-scale estimates (not measured)
