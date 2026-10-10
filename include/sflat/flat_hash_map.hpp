@@ -6,9 +6,10 @@
 // (C++17), designed for very large tables:
 //
 //  * SIMD group probing (SSE2 x16, AVX2 x32 when available) à la SwissTable.
-//  * Growth factor 1.5x instead of 2x, and capacities are any multiple of the
+//  * The growth factor shrinks as the table gets large (2x, then 1.5x, then
+//    1.25x; see SFLAT_GROW_2X_BELOW). Capacities are any multiple of the
 //    group width (not restricted to powers of two) thanks to Lemire's
-//    "fastrange" mapping.  This bounds memory waste for 100M+ entry tables.
+//    "fastrange" mapping. This bounds memory waste for very large tables.
 //  * Incremental growth: the old table is migrated in small steps, and (on
 //    Linux, with std::allocator) the memory behind the migration front is
 //    given back to the kernel, so growth does not need old + new at once.
@@ -52,6 +53,15 @@
 // transparent huge pages (default: on).
 #if !defined(SFLAT_USE_THP)
 #define SFLAT_USE_THP 1
+#endif
+// Growth tiers, by the size of the current table in bytes (slots plus control
+// bytes): below SFLAT_GROW_2X_BELOW the table grows 2x, below
+// SFLAT_GROW_1_5X_BELOW it grows 1.5x, else 1.25x.
+#if !defined(SFLAT_GROW_2X_BELOW)
+#define SFLAT_GROW_2X_BELOW (2ULL << 30)  // 2 GiB
+#endif
+#if !defined(SFLAT_GROW_1_5X_BELOW)
+#define SFLAT_GROW_1_5X_BELOW (10ULL << 30)  // 10 GiB
 #endif
 #if !defined(SFLAT_USE_MMAP)
 #if defined(__linux__)
@@ -291,9 +301,15 @@ class flat_hash_map {
 
   static constexpr size_t kWidth = detail::Group::kWidth;
   static constexpr double kDefaultMaxLoadFactor = 0.875;
-  // 1.5x growth: growth by 3/2 instead of 2/1.
-  static constexpr size_t kGrowNum = 3;
-  static constexpr size_t kGrowDen = 2;
+  // Largest capacity: Fastrange is 32-bit, so fewer than 2^32 groups (with
+  // AVX2 about 137G slots), and the slot array must fit in size_t.
+  static constexpr size_t kMaxCapacity =
+      static_cast<size_t>(
+          ((uint64_t{1} << 32) - 1) * kWidth <
+                  std::numeric_limits<size_t>::max() / sizeof(slot_type)
+              ? ((uint64_t{1} << 32) - 1) * kWidth
+              : std::numeric_limits<size_t>::max() / sizeof(slot_type)) /
+      kWidth * kWidth;
   // Old slots migrated per insert during growth.
   static constexpr size_t kMigrateBatch = 64;  // multiple of kWidth
   // With std::allocator the map uses detail::PageAlloc (THP, page release).
@@ -614,7 +630,8 @@ class flat_hash_map {
   bool empty() const noexcept { return size_ == 0; }
   size_type size() const noexcept { return size_; }
   size_type max_size() const noexcept {
-    return (std::numeric_limits<size_type>::max() / sizeof(slot_type)) - 1;
+    return static_cast<size_type>(static_cast<double>(kMaxCapacity) *
+                                  max_load_factor_);
   }
 
   // Complete an ongoing growth migration. Inserts do this in small steps;
@@ -993,17 +1010,36 @@ class flat_hash_map {
   size_t min_cap_for(size_t n) const noexcept {
     if (n == 0) return 0;
     const double need = static_cast<double>(n) / max_load_factor_;
+    if (need > static_cast<double>(kMaxCapacity))
+      return std::numeric_limits<size_t>::max();  // check_capacity throws
     size_t c = static_cast<size_t>(need);
     if (static_cast<double>(c) < need) ++c;  // ceil
     if (c < kWidth) c = kWidth;
     return align_cap(c);
   }
 
-  // 1.5x growth (never 2x): keeps peak memory bounded for huge tables.
+  // Growth by tiers of the current table size: 2x for small tables (few
+  // moves per element), 1.5x and then 1.25x for large tables (less memory
+  // waste and a lower growth peak).
   size_t grown_cap(size_t need) const noexcept {
-    size_t grown = cap_ + cap_ / kGrowDen;  // cap_ * 1.5
-    if (grown < cap_) grown = std::numeric_limits<size_t>::max();  // overflow
-    return align_cap(grown > need ? grown : need);
+    const uint64_t c = cap_;
+    const uint64_t bytes = c * (sizeof(slot_type) + 1);
+    uint64_t grown = bytes < SFLAT_GROW_2X_BELOW     ? c * 2
+                     : bytes < SFLAT_GROW_1_5X_BELOW ? c + c / 2
+                                                     : c + c / 4;
+    if (grown < need) grown = need;
+    if (grown > kMaxCapacity) {
+      // Clamp to the largest capacity; if even that is too small,
+      // check_capacity throws.
+      if (need > kMaxCapacity) return need;
+      grown = kMaxCapacity;
+    }
+    return align_cap(static_cast<size_t>(grown));
+  }
+
+  static void check_capacity(size_t cap) {
+    if (cap > kMaxCapacity)
+      throw std::length_error("sflat::flat_hash_map: too many elements");
   }
 
   size_t load_limit() const noexcept {
@@ -1054,8 +1090,8 @@ class flat_hash_map {
   // Start incremental migration to a new table. The old table is kept and
   // migrated in small steps to avoid latency spikes.
   void begin_migration(size_t new_cap) {
+    check_capacity(new_cap);
     new_cap = align_cap(new_cap);
-    assert(new_cap / kWidth < (1ULL << 32));
     assert(!is_migrating());
     // The new slots start without huge pages; migrate_step enables them just
     // ahead of the front, so stray writes far ahead do not commit whole huge
@@ -1184,14 +1220,12 @@ class flat_hash_map {
   void rehash_to(size_t new_cap) {
     // If migrating, finish it first to avoid losing unmigrated elements.
     if (is_migrating()) finish_migration();
+    check_capacity(new_cap);
     new_cap = align_cap(new_cap);
     slot_type* new_slots = nullptr;
     uint8_t* new_ctrl = empty_ctrl();
     uint8_t* new_overflow = nullptr;
     if (new_cap) {
-      // Hot-path Fastrange is 32-bit; 4G groups = 137G slots is far beyond
-      // any practical table (100B entries need ~3.6G groups).
-      assert(new_cap / kWidth < (1ULL << 32));
       new_slots = alloc_slots(new_cap, true);
       new_ctrl = alloc_bytes(new_cap);
       std::memset(new_ctrl, detail::kEmpty, new_cap);
@@ -1549,9 +1583,7 @@ class flat_hash_map {
   // ----------------------------------------------------------------- buckets
   size_type bucket_count() const noexcept { return cap_; }
 
-  size_type max_bucket_count() const noexcept {
-    return max_size() < cap_ ? 0 : max_size();
-  }
+  size_type max_bucket_count() const noexcept { return kMaxCapacity; }
 
   // Open addressing: a "bucket" holds at most one element.
   size_type bucket_size(size_type n) const {
