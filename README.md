@@ -85,7 +85,7 @@ Memory formula for `uint64_t -> uint64_t`:
 ```
 bytes/entry = (16 + 1 + 1/32) / 0.875 = about 19.5
 ```
-The measured value is 19.5 to 20.7 bytes/entry. The difference is allocator
+The measured value is 19.5 to 21.6 bytes/entry. The difference is allocator
 overhead.
 
 ### Growth memory (Linux)
@@ -245,31 +245,34 @@ benefit grows with table size.
 
 | Item | Value |
 |------|-------|
-| Machine | KVM virtual machine (cloud) |
-| CPU | Intel Xeon @ 2.10 GHz, family 6 model 207 (5th gen Xeon Scalable, Emerald Rapids) |
-| Cores | 4 vCPU (4 cores, 1 thread per core, 1 socket) |
-| ISA | SSE4.2, AVX2, BMI2, AVX-512 |
-| Cache | L1d 48 KiB per core, L2 2 MiB per core, L3 260 MiB shared |
-| Memory | 15 GiB, no swap |
-| OS | Ubuntu 24.04.5 LTS |
-| Kernel | Linux 6.18.44 |
-| THP | `madvise` (defrag `madvise`); free page reporting on |
-| C library | glibc 2.39 |
-| Compiler | g++ 13.3.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
+| Machine | Bare metal (no virtualization) |
+| CPU | Intel Celeron N5105 @ 2.00 GHz, family 6 model 156 (Jasper Lake, Tremont cores) |
+| Cores | 4 cores, 1 thread per core, 1 socket |
+| ISA | SSE4.2, AES-NI, SHA-NI, GFNI. **No AVX, AVX2 or BMI2**, so sflat uses the SSE2 16-slot group path |
+| Cache | L1d 32 KiB per core, L2 1.5 MiB shared, L3 4 MiB shared |
+| Memory | 7 GiB usable, 1 GiB swap |
+| OS | Ubuntu 26.04.1 LTS |
+| Kernel | Linux 7.0.0-31-generic |
+| THP | `madvise` (defrag `madvise`) |
+| CPU frequency | `intel_pstate`, governor `powersave` (HWP) |
+| C library | glibc 2.43 |
+| Compiler | g++ 15.2.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
 
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
   absl::flat_hash_map and absl::node_hash_map (Abseil LTS 20260817.0),
-  std::unordered_map (libstdc++ 13). They use glibc malloc without THP.
-- All maps are compiled with `-DNDEBUG`, so no debug asserts run. (The THP
-  and latency tables come from earlier runs.)
+  std::unordered_map (libstdc++ 15). They use glibc malloc without THP.
+- All maps are compiled with `-DNDEBUG`, so no debug asserts run.
 - Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
   child process. Memory is the child peak RSS minus the baseline (the input
   arrays only).
-- Before each size, a warm-up child touches and frees memory. In a VM the
-  host backs guest memory on first use, which is very slow. Without the
-  warm-up, the first map in the run order pays this cost.
-- 1M and 10M: median of 3 runs. 100M: 1 run.
+- Before each size, a warm-up child touches and frees memory. (This matters
+  most in a VM, where the host backs guest memory on first use.)
+- 1M and 10M: median of 3 runs. The runs agree well on this bare-metal
+  machine: the sflat rows vary by less than 2 percent, except no-reserve
+  insert at 1M (141 to 156 ns). 50M: 1 run.
+- 100M is not measured. The four input arrays alone take 3.2 GB, and the
+  node-based maps need another 4 GB. This does not fit in 7 GiB.
 
 ### Results
 
@@ -283,65 +286,91 @@ value in the row.
   test.
 - "growth peak" is the peak RSS of the no-reserve test.
 - sflat grows 2x below 2 GiB, so all three sizes here use the 2x tier.
+- The L3 cache is only 4 MiB. Even the 1M tables (about 20 to 50 MB) do not
+  fit in cache, so all sizes are bound by DRAM latency and TLB misses.
 
 **n = 1,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 74.4 | 37.3 | **27.3** | 100.4 | 38.5 | 76.8 | 122.5 |
-| find hit (insert order) | 10.6 | 9.5 | **9.2** | 22.6 | 12.0 | 15.4 | 33.7 |
-| find hit (random order) | 10.6 | 13.9 | **8.9** | 24.6 | 11.3 | 21.2 | 36.0 |
-| find miss | 18.2 | 12.6 | **5.6** | 22.7 | 9.6 | 10.9 | 41.0 |
-| erase | 14.7 | 22.5 | **11.1** | 49.7 | 16.7 | 31.9 | 78.9 |
-| iterate | 11.9 | **0.6** | 10.6 | 16.7 | 10.0 | 12.3 | 25.7 |
-| insert (no reserve) | 139.4 | 101.5 | **60.8** | 156.2 | 66.6 | 104.7 | 196.0 |
-| bytes/entry (steady) | **21.4** | 34.1 | 34.9 | 46.7 | 37.0 | 52.2 | 41.9 |
-| bytes/entry (growth peak) | 40.6 | **36.1** | 51.2 | 46.7 | 54.2 | 58.4 | 45.2 |
+| insert (reserved) | **67.4** | 94.5 | 92.1 | 275.2 | 105.7 | 144.3 | 382.3 |
+| find hit (insert order) | 44.1 | 44.6 | 53.8 | 67.7 | 50.5 | **42.5** | 107.3 |
+| find hit (random order) | **45.2** | 82.1 | 55.2 | 107.0 | 50.3 | 97.5 | 144.3 |
+| find miss | 32.9 | 34.7 | **14.2** | 81.3 | 41.4 | 44.9 | 161.5 |
+| erase | **70.6** | 160.2 | 92.6 | 258.0 | 87.2 | 219.7 | 453.7 |
+| iterate | 22.3 | **1.9** | 20.1 | 57.0 | 17.8 | 47.0 | 70.0 |
+| insert (no reserve) | 141.5 | 232.3 | **131.5** | 544.5 | 138.8 | 325.5 | 584.1 |
+| bytes/entry (steady) | **21.6** | 34.1 | 34.8 | 46.6 | 36.9 | 52.2 | 41.8 |
+| bytes/entry (growth peak) | 40.7 | **36.2** | 51.3 | 46.7 | 54.4 | 58.4 | 45.1 |
+
+At 1M the no-reserve table lands just after a 2x step (2.1M slots, load
+0.48). This is the reason for the 40.7 bytes/entry growth peak. It is the
+cost of 2x growth for small tables.
 
 **n = 10,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 82.4 | 56.2 | **35.1** | 176.3 | 50.2 | 97.3 | 212.9 |
-| find hit (insert order) | 23.1 | **19.5** | 25.0 | 39.4 | 28.3 | 25.7 | 51.5 |
-| find hit (random order) | 26.3 | 32.9 | **25.3** | 55.1 | 28.0 | 44.6 | 64.7 |
-| find miss | 22.2 | 20.6 | **10.8** | 49.4 | 21.1 | 22.6 | 76.8 |
-| erase | 32.6 | 47.4 | **31.7** | 115.9 | 46.5 | 85.0 | 186.3 |
-| iterate | 11.7 | **1.0** | 11.5 | 32.3 | 10.3 | 19.1 | 76.6 |
-| insert (no reserve) | 93.3 | 115.6 | **54.7** | 245.2 | 63.3 | 136.7 | 396.2 |
+| insert (reserved) | 155.0 | **133.6** | 234.9 | 370.2 | 203.6 | 245.9 | 481.5 |
+| find hit (insert order) | 66.9 | **64.1** | 111.2 | 106.0 | 107.7 | 81.5 | 167.1 |
+| find hit (random order) | **67.8** | 136.8 | 111.1 | 193.6 | 107.1 | 206.0 | 245.9 |
+| find miss | 52.5 | 54.2 | **40.4** | 150.1 | 101.9 | 98.2 | 240.9 |
+| erase | **159.9** | 212.6 | 183.2 | 366.8 | 186.3 | 287.3 | 603.0 |
+| iterate | 22.2 | **2.0** | 18.3 | 86.8 | 16.5 | 65.4 | 95.5 |
+| insert (no reserve) | **181.8** | 299.0 | 224.2 | 664.1 | 215.1 | 471.8 | 789.7 |
 | bytes/entry (steady) | **19.9** | 29.6 | 27.0 | 42.8 | 28.7 | 47.2 | 40.4 |
-| bytes/entry (growth peak) | 29.9 | **29.6** | 40.4 | 42.8 | 42.9 | 47.2 | 41.9 |
+| bytes/entry (growth peak) | 29.9 | **29.6** | 40.4 | 42.8 | 42.9 | 47.2 | 41.8 |
 
-The sflat insert rows vary a lot between runs in this VM because of huge
-page faults (see "THP on and off" below). At 1M, reserved insert was 58 to
-96 ns and no-reserve insert 61 to 183 ns. With `SFLAT_USE_THP=0` the same
-rows were stable: 30 to 33 ns and 70 to 85 ns. At 10M, reserved insert was
-37 to 84 ns.
-
-At 1M the no-reserve table lands just after a 2x step (2.1M slots, load
-0.48). This is the reason for the 40.6 bytes/entry growth peak. It is the
-cost of 2x growth for small tables.
-
-**n = 100,000,000**
+**n = 50,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 82.5 | 149.6 | 95.2 | 365.4 | **68.0** | 289.7 | 385.9 |
-| find hit (insert order) | 41.0 | **32.2** | 43.2 | 55.1 | 40.2 | 40.9 | 71.2 |
-| find hit (random order) | **39.0** | 51.5 | 44.3 | 78.8 | 42.3 | 66.6 | 91.1 |
-| find miss | 29.7 | 34.6 | **21.1** | 70.5 | 41.4 | 48.1 | 100.2 |
-| erase | 54.8 | 80.1 | **50.0** | 154.3 | 69.7 | 124.8 | 268.8 |
-| iterate | 11.7 | **1.1** | 11.1 | 47.0 | 10.4 | 25.3 | 120.8 |
-| insert (no reserve) | **110.6** | 224.0 | 131.0 | 447.3 | 123.9 | 320.1 | 638.0 |
-| bytes/entry (steady) | **19.5** | 26.7 | 21.5 | 40.6 | 22.8 | 44.1 | 40.1 |
-| bytes/entry (growth peak) | **23.6** | 26.7 | 32.2 | 40.6 | 34.2 | 44.1 | 40.1 |
+| insert (reserved) | **181.1** | 234.3 | 324.5 | 489.5 | 234.9 | 288.3 | 567.9 |
+| find hit (insert order) | **71.8** | 105.1 | 196.7 | 182.0 | 194.1 | 155.0 | 260.1 |
+| find hit (random order) | **71.6** | 274.4 | 200.3 | 353.9 | 194.4 | 347.2 | 428.1 |
+| find miss | 60.4 | 99.3 | **57.9** | 272.6 | 190.0 | 186.1 | 349.3 |
+| erase | **179.0** | 285.2 | 221.4 | 492.4 | 225.0 | 370.1 | 748.0 |
+| iterate | 22.2 | **2.0** | 16.7 | 160.2 | 15.5 | 140.6 | 117.7 |
+| insert (no reserve) | **207.9** | 407.7 | 315.9 | 767.2 | 258.1 | 509.9 | 1341.0 |
+| bytes/entry (steady) | **19.6** | 26.8 | 21.5 | 40.6 | 22.8 | 44.1 | 40.7 |
+| bytes/entry (growth peak) | **23.7** | 26.7 | 32.2 | 40.6 | 34.2 | 44.1 | 56.2 |
 
-100M: 1 run.
+50M: 1 run.
+
+### THP on and off (sflat only)
+
+sflat is the only map here that asks for huge pages. To separate the effect
+of THP from the effect of the map design, the same benchmark was run with
+`-DSFLAT_USE_THP=0` (sflat then uses 4 KiB pages like the other maps).
+Median of 3 runs at 1M and 10M, 1 run at 50M. The best of the other flat
+maps (boost_flat or absl_flat, from the THP-off run) is shown for reference.
+
+| ns/op | 1M THP off | 1M THP on | 10M THP off | 10M THP on | 50M THP off | 50M THP on | best other flat, 50M |
+|-------|-----------|-----------|-------------|------------|-------------|------------|----------------------|
+| insert (reserved) | 81.1 | **67.4** | 219.0 | **155.0** | 325.2 | **181.1** | 234.5 (absl_flat) |
+| find hit (random order) | 52.6 | **45.2** | 121.1 | **67.8** | 209.8 | **71.6** | 194.7 (absl_flat) |
+| insert (no reserve) | 160.1 | **141.5** | 246.1 | **181.8** | 332.5 | **207.9** | 255.2 (absl_flat) |
+
+On this machine THP is better in every row and at every size. The gain
+grows with the table: at 50M a random find is 2.9 times faster with THP.
+The Tremont core has a small TLB, so with 4 KiB pages nearly every random
+access to a large table also misses the TLB and walks the page tables.
+
+With THP off, sflat is a little slower than boost_flat and absl_flat (7 to
+14 percent on find hit at 10M and 50M, and also slower on insert). Most of the
+lead of sflat in the 10M and 50M tables above therefore comes from huge
+pages, not from the probing scheme. Other maps can get a similar gain with
+an allocator that uses huge pages, or with THP set to `always`.
+
+Unlike in the earlier KVM measurements (the fault cost of huge pages made
+small tables slower there), there is no THP penalty on this bare-metal
+machine, even at 1M.
 
 ### Insert latency during growth
 
-Insert 10M keys with no `reserve`. Each insert is timed. (Measured with the
-older 1.5x growth rule.)
+Insert 10M keys with no `reserve`. Each insert is timed. (Not re-measured.
+These values come from an earlier run on a KVM virtual machine with a Xeon
+@ 2.10 GHz, with the older 1.5x growth rule.)
 
 | Map | total | p99.9 | p99.99 | max |
 |-----|-------|-------|--------|-----|
@@ -353,42 +382,29 @@ boost_flat and emhash8 rehash the full table in one insert. sflat spreads
 the rehash over many inserts. Its worst case is 5 to 9 times smaller. The
 remaining 30 ms is mostly huge page faults and the final `MADV_COLLAPSE`.
 
-### THP on and off (sflat only)
-
-THP cuts TLB misses but makes each first touch of a 2 MiB page slower. This
-VM uses free page reporting, so a new huge page often needs host work too.
-On bare metal a huge page fault usually costs only the time to clear 2 MiB.
-(Measured with the older 1.5x growth rule.)
-
-| sflat, ns/op | 10M, THP off | 10M, THP on | 100M, THP off | 100M, THP on |
-|--------------|--------------|-------------|---------------|--------------|
-| insert (reserved) | **46 to 50** | 88 to 97 | 98.9 | **76.5** |
-| find hit (random order) | 31 to 33 | **27 to 31** | 51.6 | **43.0** |
-| insert (no reserve) | **99 to 102** | 108 to 167 | 197.0 | **159.8** |
-
-At 100M, THP is better in all rows. At 1M and 10M the table fits in the
-260 MiB L3 of this CPU, so the TLB gain is small and the fault cost is
-larger. To turn THP off, define `SFLAT_USE_THP=0`.
-
 ### Honest assessment
 
 - **memory (steady state)**: sflat uses the least memory at all sizes: 9 to
-  39 percent less than boost_flat, 14 to 42 percent less than absl_flat, and
+  38 percent less than boost_flat, 14 to 41 percent less than absl_flat, and
   27 to 37 percent less than emhash8.
-- **memory (growth peak)**: at 100M sflat has the lowest peak (23.6
+- **memory (growth peak)**: at 50M sflat has the lowest peak (23.7
   bytes/entry). At 10M it is equal to emhash8 (29.9 and 29.6). At 1M the 2x
-  step makes it 40.6, more than emhash8 (36.1).
-- **insert (no reserve)**: at 100M sflat is now the fastest (110.6 ns; was
-  159.8 with 1.5x growth). At 10M it went from 166 to 93 ns. boost_flat is
-  still faster at 1M and 10M.
-- **insert (reserved)**: at 100M absl_flat is the fastest (68.0), then sflat
-  (82.5). At 1M and 10M the THP fault noise in this VM hides the real speed;
-  with THP off sflat is close to boost_flat.
-- **find hit (random order)**: sflat is the fastest at 100M (39.0 ns) and
-  within 4 to 19 percent of the best at 1M and 10M.
-- **find miss**: boost_flat is still 1.4 to 3.3 times faster. sflat fills
-  the table to 0.875, so the overflow bits are often set.
-- **erase and iterate**: not a goal. Both are within 1.4x of boost_flat.
+  step makes it 40.7, more than emhash8 (36.2).
+- **find hit (random order)**: sflat is the fastest at all sizes (45, 68
+  and 72 ns). At 10M and 50M this is mainly the THP effect (see above).
+  With THP off it is 7 to 14 percent slower than absl_flat.
+- **insert**: sflat is the fastest with reserve at 1M and 50M, and without
+  reserve at 10M and 50M. emhash8 is faster with reserve at 10M, and
+  boost_flat without reserve at 1M. With THP off, absl_flat is faster on
+  insert at 10M and 50M.
+- **find miss**: boost_flat is still the fastest at all sizes (2.3 times
+  faster at 1M, about equal at 50M). sflat fills the table to 0.875, so the
+  overflow bits are often set.
+- **erase**: sflat is the fastest at all sizes here.
+- **iterate**: not a goal. sflat is up to 1.4 times slower than boost_flat
+  and absl_flat.
+- **SSE2 only**: this CPU has no AVX2, so sflat probes 16-slot groups. The
+  results show that the SSE2 path is competitive.
 
 ### Large-scale estimates (not measured)
 
@@ -402,8 +418,8 @@ The table below extrapolates from the measured steady-state bytes/entry.
 
 With page release, the growth peak is about the size of the new table
 (2x, 1.5x or 1.25x of the old table) plus the control bytes. The measured
-peak is 23.6 bytes/entry at 100M. The actual values depend on the allocator and on the key
-and value sizes.
+peak is 23.7 bytes/entry at 50M (23.6 at 100M in an earlier run). The actual
+values depend on the allocator and on the key and value sizes.
 
 ## Correctness tests
 
