@@ -243,15 +243,26 @@ benefit grows with table size.
 
 ### Test environment
 
-- CPU: Intel Xeon @ 2.10 GHz (4 vCPU, AVX2 and AVX-512, 260 MiB L3),
-  RAM 15 GiB. The machine is a VM.
-- Kernel: Linux 6.18. THP setting `madvise`.
-- Compiler: g++ 13.3.0 with `-O3 -march=native -std=c++17`.
+| Item | Value |
+|------|-------|
+| Machine | KVM virtual machine (cloud) |
+| CPU | Intel Xeon @ 2.10 GHz, family 6 model 207 (5th gen Xeon Scalable, Emerald Rapids) |
+| Cores | 4 vCPU (4 cores, 1 thread per core, 1 socket) |
+| ISA | SSE4.2, AVX2, BMI2, AVX-512 |
+| Cache | L1d 48 KiB per core, L2 2 MiB per core, L3 260 MiB shared |
+| Memory | 15 GiB, no swap |
+| OS | Ubuntu 24.04.5 LTS |
+| Kernel | Linux 6.18.44 |
+| THP | `madvise` (defrag `madvise`); free page reporting on |
+| C library | glibc 2.39 |
+| Compiler | g++ 13.3.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
+
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
   absl::flat_hash_map and absl::node_hash_map (Abseil LTS 20260817.0),
   std::unordered_map (libstdc++ 13). They use glibc malloc without THP.
-- All maps are compiled with `-DNDEBUG`, so no debug asserts run.
+- All maps are compiled with `-DNDEBUG`, so no debug asserts run. (The THP
+  and latency tables come from earlier runs.)
 - Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
   child process. Memory is the child peak RSS minus the baseline (the input
   arrays only).
