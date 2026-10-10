@@ -1,5 +1,6 @@
 // Benchmark: sflat::flat_hash_map vs emhash8::HashMap vs
-// boost::unordered_flat_map vs boost::unordered_map vs std::unordered_map.
+// boost::unordered_flat_map vs boost::unordered_map vs std::unordered_map,
+// and with -DHAS_ABSL also absl::flat_hash_map and absl::node_hash_map.
 //
 // Each scenario runs in a forked child so the parent can read the child's
 // peak RSS (ru_maxrss) via wait4() for an honest per-map memory number.
@@ -8,7 +9,7 @@
 //   A: reserve(N) + insert N, find N hits, find N misses, erase N/2,
 //      full iteration.  Map is kept alive at exit -> peak RSS ~= map memory.
 //   B: insert N with NO reserve (exercises growth/rehash policy).
-//   baseline: only the key/value/miss arrays, no map (subtracted from A).
+//   baseline: only the input arrays, no map (subtracted from A and B).
 
 #include <sflat/flat_hash_map.hpp>
 
@@ -21,6 +22,7 @@
 
 #ifdef HAS_ABSL
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
 #endif
 
 #include <chrono>
@@ -221,12 +223,12 @@ void child_baseline(size_t n) {
   (void)acc;
 }
 
-// Run fn() in a forked child; return child's peak RSS in KiB.
-long run_child(void (*fn)(void)) {
+// Run fn(n) in a forked child; return child's peak RSS in KiB.
+long run_child(void (*fn)(size_t), size_t n) {
   std::fflush(stdout);  // don't let the child re-emit parent's buffered output
   pid_t pid = fork();
   if (pid == 0) {
-    fn();
+    fn(n);
     _exit(0);
   }
   int status = 0;
@@ -237,32 +239,28 @@ long run_child(void (*fn)(void)) {
   return ru.ru_maxrss;  // KiB on Linux
 }
 
-// ---- instantiations ----------------------------------------------------------
-using SflatMap = sflat::flat_hash_map<uint64_t, uint64_t>;
-using EmhashMap = emhash8::HashMap<uint64_t, uint64_t>;
-using BoostMap = boost::unordered_flat_map<uint64_t, uint64_t>;
-using BoostNodeMap = boost::unordered_map<uint64_t, uint64_t>;
-using StdMap = std::unordered_map<uint64_t, uint64_t>;
-#ifdef HAS_ABSL
-using AbslMap = absl::flat_hash_map<uint64_t, uint64_t>;
-#endif
+// ---- maps under test --------------------------------------------------------
+struct Entry {
+  const char* name;
+  void (*a)(size_t);
+  void (*b)(size_t);
+};
 
-void run_A_sflat(size_t n) { child_A<SflatMap>("sflat", n); }
-void run_A_emhash(size_t n) { child_A<EmhashMap>("emhash8", n); }
-void run_A_boost(size_t n) { child_A<BoostMap>("boost_flat", n); }
-void run_A_boost_node(size_t n) { child_A<BoostNodeMap>("boost_node", n); }
-void run_A_std(size_t n) { child_A<StdMap>("std_unordered", n); }
+#define SFLAT_BENCH_MAP(NAME, ...)                                    \
+  Entry{NAME, [](size_t n) { child_A<__VA_ARGS__>(NAME, n); },        \
+        [](size_t n) { child_B<__VA_ARGS__>(NAME, n); }}
+
+const Entry kMaps[] = {
+    SFLAT_BENCH_MAP("sflat", sflat::flat_hash_map<uint64_t, uint64_t>),
+    SFLAT_BENCH_MAP("emhash8", emhash8::HashMap<uint64_t, uint64_t>),
+    SFLAT_BENCH_MAP("boost_flat", boost::unordered_flat_map<uint64_t, uint64_t>),
+    SFLAT_BENCH_MAP("boost_node", boost::unordered_map<uint64_t, uint64_t>),
 #ifdef HAS_ABSL
-void run_A_absl(size_t n) { child_A<AbslMap>("absl_flat", n); }
+    SFLAT_BENCH_MAP("absl_flat", absl::flat_hash_map<uint64_t, uint64_t>),
+    SFLAT_BENCH_MAP("absl_node", absl::node_hash_map<uint64_t, uint64_t>),
 #endif
-void run_B_sflat(size_t n) { child_B<SflatMap>("sflat", n); }
-void run_B_emhash(size_t n) { child_B<EmhashMap>("emhash8", n); }
-void run_B_boost(size_t n) { child_B<BoostMap>("boost_flat", n); }
-void run_B_boost_node(size_t n) { child_B<BoostNodeMap>("boost_node", n); }
-void run_B_std(size_t n) { child_B<StdMap>("std_unordered", n); }
-#ifdef HAS_ABSL
-void run_B_absl(size_t n) { child_B<AbslMap>("absl_flat", n); }
-#endif
+    SFLAT_BENCH_MAP("std", std::unordered_map<uint64_t, uint64_t>),
+};
 
 }  // namespace
 
@@ -273,102 +271,28 @@ int main(int argc, char** argv) {
     sizes = {1000000, 5000000};
   }
 
-  std::printf("# maps: sflat (1.5x growth, mlf=0.875, AVX2 groups) vs "
-              "emhash8 (mlf=0.80) vs boost::unordered_flat_map vs "
-              "boost::unordered_map vs std::unordered_map\n");
-  std::printf("# cpu: x86-64, flags: -O3 -march=native -std=c++17\n");
-  std::printf("# times are ns/op; rss values are child peak RSS in MiB\n\n");
+  std::printf("# maps:");
+  for (const Entry& e : kMaps) std::printf(" %s", e.name);
+  std::printf("\n# cpu: x86-64, flags: -O3 -march=native -std=c++17\n");
+  std::printf("# times are ns/op; memory is child peak RSS minus baseline\n\n");
 
   for (size_t n : sizes) {
     std::printf("=== n = %zu ===\n", n);
-    // baseline (arrays only)
-    struct Ctx {
-      size_t n;
-    };
-    // use small trampolines via statics
-    static size_t g_n = 0;
-    g_n = n;
-    run_child([] { child_warmup(g_n * 80); });
-    const long rss_base =
-        run_child([] { child_baseline(g_n); });
-    const long rss_sflat =
-        run_child([] { run_A_sflat(g_n); });
-    const long rss_emhash =
-        run_child([] { run_A_emhash(g_n); });
-    const long rss_boost =
-        run_child([] { run_A_boost(g_n); });
-    const long rss_boost_node =
-        run_child([] { run_A_boost_node(g_n); });
-    const long rss_std =
-        run_child([] { run_A_std(g_n); });
-#ifdef HAS_ABSL
-    const long rss_absl =
-        run_child([] { run_A_absl(g_n); });
-#endif
-    std::printf(
-        "  peak_rss MiB: baseline=%.1f sflat=%.1f emhash8=%.1f boost_flat=%.1f boost_node=%.1f std=%.1f"
-#ifdef HAS_ABSL
-        " absl=%.1f"
-#endif
-        "\n",
-        rss_base / 1024.0, rss_sflat / 1024.0, rss_emhash / 1024.0,
-        rss_boost / 1024.0, rss_boost_node / 1024.0, rss_std / 1024.0
-#ifdef HAS_ABSL
-        , rss_absl / 1024.0
-#endif
-        );
-    std::printf(
-        "  map-only MiB (minus baseline): sflat=%.1f emhash8=%.1f "
-        "boost_flat=%.1f boost_node=%.1f std=%.1f"
-#ifdef HAS_ABSL
-        " absl=%.1f"
-#endif
-        "  => bytes/entry: %.1f / %.1f / %.1f / %.1f / %.1f"
-#ifdef HAS_ABSL
-        " / %.1f"
-#endif
-        "\n",
-        (rss_sflat - rss_base) / 1024.0, (rss_emhash - rss_base) / 1024.0,
-        (rss_boost - rss_base) / 1024.0, (rss_boost_node - rss_base) / 1024.0,
-        (rss_std - rss_base) / 1024.0
-#ifdef HAS_ABSL
-        , (rss_absl - rss_base) / 1024.0
-#endif
-        ,
-        (rss_sflat - rss_base) * 1024.0 / n, (rss_emhash - rss_base) * 1024.0 / n,
-        (rss_boost - rss_base) * 1024.0 / n, (rss_boost_node - rss_base) * 1024.0 / n,
-        (rss_std - rss_base) * 1024.0 / n
-#ifdef HAS_ABSL
-        , (rss_absl - rss_base) * 1024.0 / n
-#endif
-        );
-    // scenario B (no reserve). Peak RSS here includes the transient peak
+    run_child([](size_t m) { child_warmup(m * 80); }, n);
+    const long rss_base = run_child(child_baseline, n);
+    std::vector<long> rss_a, rss_b;
+    // Scenario A (reserved); peak RSS ~= map memory.
+    for (const Entry& e : kMaps) rss_a.push_back(run_child(e.a, n));
+    // Scenario B (no reserve). Peak RSS here includes the transient peak
     // of growth (old table + new table alive at the same time).
-    const long rssB_sflat = run_child([] { run_B_sflat(g_n); });
-    const long rssB_emhash = run_child([] { run_B_emhash(g_n); });
-    const long rssB_boost = run_child([] { run_B_boost(g_n); });
-    const long rssB_boost_node = run_child([] { run_B_boost_node(g_n); });
-    const long rssB_std = run_child([] { run_B_std(g_n); });
-#ifdef HAS_ABSL
-    const long rssB_absl = run_child([] { run_B_absl(g_n); });
-#endif
-    std::printf(
-        "  B growth peak bytes/entry (minus baseline): sflat=%.1f "
-        "emhash8=%.1f boost_flat=%.1f boost_node=%.1f std=%.1f"
-#ifdef HAS_ABSL
-        " absl=%.1f"
-#endif
-        "\n",
-        (rssB_sflat - rss_base) * 1024.0 / n,
-        (rssB_emhash - rss_base) * 1024.0 / n,
-        (rssB_boost - rss_base) * 1024.0 / n,
-        (rssB_boost_node - rss_base) * 1024.0 / n,
-        (rssB_std - rss_base) * 1024.0 / n
-#ifdef HAS_ABSL
-        , (rssB_absl - rss_base) * 1024.0 / n
-#endif
-        );
-    std::printf("\n");
+    for (const Entry& e : kMaps) rss_b.push_back(run_child(e.b, n));
+    std::printf("  bytes/entry (steady):");
+    for (size_t i = 0; i < rss_a.size(); ++i)
+      std::printf(" %s=%.1f", kMaps[i].name, (rss_a[i] - rss_base) * 1024.0 / n);
+    std::printf("\n  bytes/entry (growth peak):");
+    for (size_t i = 0; i < rss_b.size(); ++i)
+      std::printf(" %s=%.1f", kMaps[i].name, (rss_b[i] - rss_base) * 1024.0 / n);
+    std::printf("\n\n");
     std::fflush(stdout);
   }
   return 0;

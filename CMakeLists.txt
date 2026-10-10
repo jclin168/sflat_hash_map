@@ -41,6 +41,16 @@ if(SFLAT_BUILD_BENCH)
     target_include_directories(bench PRIVATE ${SFLAT_BOOST_DIR}
                                              ${SFLAT_EMHASH_DIR})
     target_compile_options(bench PRIVATE -O3 -Wall)
+    # Release semantics for all maps (no debug asserts in absl or boost).
+    target_compile_definitions(bench PRIVATE NDEBUG)
+    # Optional Abseil: thirdparty/abseil (an install prefix) or the system.
+    find_package(absl CONFIG QUIET
+      PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/abseil)
+    if(absl_FOUND)
+      target_compile_definitions(bench PRIVATE HAS_ABSL)
+      target_link_libraries(bench PRIVATE absl::flat_hash_map
+                                          absl::node_hash_map)
+    endif()
   else()
     message(STATUS "emhash or boost not found, skipping bench target")
   endif()
