@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstdio>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -250,9 +251,8 @@ void test_api_surface() {
 }
 
 void test_growth_factor() {
-  // Growth must be smooth (no 2x memory spikes): with extendible hashing,
-  // buckets are added one at a time (~17KB each). Directory doublings
-  // (2x slot-capacity) are cheap pointer arrays, not memory spikes.
+  // Small tables grow 2x (see SFLAT_GROW_2X_BELOW); no step may be larger.
+  // tests/growth_tiers.cpp checks the 1.5x and 1.25x tiers.
   sflat::flat_hash_map<uint64_t, uint64_t> m;
   size_t prev_slots = 0;
   double worst = 0.0;
@@ -263,17 +263,27 @@ void test_growth_factor() {
       if (prev_slots >= 64) {
         const double f = static_cast<double>(c) / static_cast<double>(prev_slots);
         if (f > worst) worst = f;
-        // Allow 2x directory doublings (cheap); forbid larger jumps.
         CHECK(f < 2.01);
       }
       prev_slots = c;
     }
   }
   std::printf("test_growth_factor OK (worst growth %.3f)\n", worst);
-  // Memory bound: capacity stays below 1.8x of ideal.
+  // Memory bound: capacity stays at most 2x of ideal.
   const size_t cap = m.bucket_count();
   const double ideal = static_cast<double>(m.size()) / m.max_load_factor();
-  CHECK(static_cast<double>(cap) < ideal * 1.8);
+  CHECK(static_cast<double>(cap) < ideal * 2.01);
+  // The capacity limit: fewer than 2^32 groups.
+  CHECK(m.max_bucket_count() < (uint64_t{1} << 32) * 32);
+  CHECK(m.max_size() < m.max_bucket_count());
+  bool threw = false;
+  try {
+    m.reserve(m.max_size() + 1000);
+  } catch (const std::length_error&) {
+    threw = true;
+  }
+  CHECK(threw);
+  CHECK(m.size() == 300000);
 }
 
 void test_sequential_keys() {

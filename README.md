@@ -4,7 +4,8 @@ sflat::flat_hash_map is a C++17 header-only hash map. It uses open
 addressing. The interface matches the common subset of std::unordered_map.
 
 The design has three goals. First, insert and find are fast. Second, the
-growth factor is 1.5x, not 2x. This uses less memory. Third, growth is
+growth factor gets smaller as the table gets large (2x, 1.5x, 1.25x). This
+uses less memory for large tables. Third, growth is
 incremental and gives old pages back to the kernel. This avoids a latency
 spike and keeps the growth memory peak low. The map suits large data sets
 where memory is important.
@@ -57,11 +58,20 @@ The map has three arrays.
   `(n * (h >> 32)) >> 32`. This is one `IMUL r32` instruction (1 uop). It
   is about 5 times faster than 128-bit multiplication. It does not need a
   power of two, unlike a bitmask.
-- The growth factor is about **1.5x**. The measured maximum is 1.667x. This
-  occurs only in very small tables:
-  ```
-  64 -> 96 -> 160 -> 256 -> 384 -> 608 -> ...
-  ```
+- The growth factor depends on the size of the current table (slots plus
+  control bytes):
+
+  | Current table size | Growth factor |
+  |--------------------|---------------|
+  | less than 2 GiB    | 2x            |
+  | 2 GiB to 10 GiB    | 1.5x          |
+  | 10 GiB or more     | 1.25x         |
+
+  Small tables grow 2x, so each element moves fewer times. Large tables
+  grow slowly, so the unused capacity and the growth peak stay small. For
+  `uint64_t -> uint64_t` (17 bytes per slot), 2 GiB is about 126M slots
+  (110M entries) and 10 GiB is about 630M slots (550M entries). Set the
+  limits in bytes with `SFLAT_GROW_2X_BELOW` and `SFLAT_GROW_1_5X_BELOW`.
 - The default max load factor is 0.875.
 - **Incremental rehash**: the map does not move all items at once during
   growth. Each insert moves the next 64 old slots (two groups) to the new
@@ -129,10 +139,12 @@ Configuration macros (define before the include):
 |-------|---------|--------|
 | `SFLAT_USE_MMAP` | 1 on Linux | 0: use `operator new` for all arrays. No page release, no THP. |
 | `SFLAT_USE_THP` | 1 | 0: keep `mmap` and page release, but give no huge page hints. |
+| `SFLAT_GROW_2X_BELOW` | 2 GiB | Tables smaller than this many bytes grow 2x. |
+| `SFLAT_GROW_1_5X_BELOW` | 10 GiB | Tables smaller than this grow 1.5x; larger tables grow 1.25x. |
 
 A custom allocator disables both. The map then uses only the allocator.
 
-### Why 1.5x uses less memory than 2x
+### Why a smaller growth factor uses less memory
 
 A 2x growth needs a 3x peak during rehash (old table plus new table). The
 steady-state capacity can reach 2x of the need. A 1.5x growth reduces these
@@ -145,7 +157,8 @@ to about 2.5x and 1.5x. For 100M entries at 16 bytes each:
 
 These are theoretical estimates for a plain rehash. They are the worst case
 for each strategy. sflat releases old pages during growth, so its measured
-peak is lower (see "Growth memory").
+peak is lower (see "Growth memory"). With 1.25x growth the steady-state
+capacity is at most 1.25x of the need.
 
 ### SIMD probing
 
@@ -199,8 +212,11 @@ Limits (common trade-offs of open addressing):
   threads can read at the same time while no thread writes.
 - `erase` never moves other items. `it = m.erase(it)` loops are safe, also
   during a migration.
-- The `overflow_` array needs fewer than 2^32 groups. This is 137 billion
-  slots. In practice the map never reaches this limit.
+- Capacity limit: fewer than 2^32 groups, because the position function
+  (Fastrange) is 32-bit. With AVX2 (32 slots per group) this is about 137
+  billion slots, or 120 billion entries at the 0.875 load factor. With SSE2
+  it is half. `max_size()` returns the limit. Above it, `insert`,
+  `reserve` and `rehash` throw `std::length_error`.
 
 ### Steady-state optimization
 
@@ -376,12 +392,17 @@ Run these commands:
 ```bash
 g++ -std=c++17 -O2 -march=native -I include tests/correctness.cpp -o /tmp/correctness
 /tmp/correctness
+g++ -std=c++17 -O2 -march=native -I include tests/growth_tiers.cpp -o /tmp/growth_tiers
+/tmp/growth_tiers
 ```
 
 The tests include: randomized mixed operations against
 `std::unordered_map`, string keys, sequential keys, copy and move, swap,
-iterator erase, reserve and rehash, and growth factor checks. They also pass
-with `-mno-avx2` (SSE2 path) and with ASan and UBSan.
+iterator erase, reserve and rehash, operations during a migration, large
+tables on the mmap and THP path, the capacity limit, and growth factor
+checks. `growth_tiers.cpp` sets small tier limits and checks the 2x, 1.5x
+and 1.25x steps. All tests also pass with `-mno-avx2` (SSE2 path) and with
+ASan and UBSan.
 
 ## License
 
