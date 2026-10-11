@@ -67,7 +67,7 @@
 // reads the control bytes, so the two cache misses overlap. Default: on for
 // NEON (measured on Apple M2 together with the inlining below: hits 20-35%
 // faster; misses about the same), off elsewhere. The NEON build also forces
-// find() inline: on the M2 the out-of-line call cost 13-19% at 10M entries.
+// the (small) inlined part of find() inline; see find_ptr().
 #if !defined(SFLAT_PREFETCH_SLOTS)
 #if defined(SFLAT_SIMD_NEON)
 #define SFLAT_PREFETCH_SLOTS 1
@@ -250,13 +250,14 @@ struct Group {
 #elif defined(SFLAT_SIMD_NEON)
 // 16 control bytes per group. NEON has no movemask; the compare result is
 // narrowed to 4 bits per lane instead (SHRN, 1 instruction) and moved to a
-// general register as a 64-bit mask. Keeping only the top bit of each nibble
-// gives one bit per lane.
+// general register as a 64-bit mask. Keeping only the low bit of each nibble
+// gives one bit per lane at bit 4 * lane, so ctz(m) is a multiple of 4 and
+// the slot offset folds into one shift (Lane() tells the compiler).
 struct Group {
   static constexpr size_t kWidth = 16;
   using Mask = uint64_t;
   static constexpr unsigned kShift = 2;
-  static constexpr Mask kAll = 0x8888888888888888ULL;
+  static constexpr Mask kAll = 0x1111111111111111ULL;
   uint8x16_t v;
   static Group Load(const uint8_t* p) noexcept {
     Group g;
@@ -268,7 +269,15 @@ struct Group {
     const uint8x8_t nib = vshrn_n_u16(vreinterpretq_u16_u8(eq), 4);
     return vget_lane_u64(vreinterpret_u64_u8(nib), 0) & kAll;
   }
-  static unsigned Lane(Mask m) noexcept { return Ctz(m) >> kShift; }
+  static unsigned Lane(Mask m) noexcept {
+    const unsigned c = Ctz(m);
+#if defined(__clang__)
+    __builtin_assume((c & 3) == 0);
+#elif defined(__GNUC__)
+    if (c & 3) __builtin_unreachable();
+#endif
+    return c >> kShift;
+  }
 };
 #else
 // Portable fallback: 8 control bytes per group in one uint64_t (SWAR).
@@ -885,35 +894,21 @@ class flat_hash_map {
 
   // Element with key in the given table, or nullptr. A table with cap 0 must
   // have ctrl == empty_ctrl().
-  SFLAT_FIND_INLINE static const value_type* find_in(
-      const key_type& key, uint64_t h, const uint8_t* ctrl,
-      const slot_type* slots, size_t cap, const uint8_t* overflow,
-      const KeyEqual& equal) noexcept {
+  static const value_type* find_in(const key_type& key, uint64_t h,
+                                   const uint8_t* ctrl, const slot_type* slots,
+                                   size_t cap, const uint8_t* overflow,
+                                   const KeyEqual& equal) noexcept {
     const uint8_t hh = detail::H2(h);
     const size_t ng = cap / kWidth;
     const size_t home = detail::Fastrange(h, ng);
-#if SFLAT_PREFETCH_SLOTS
-    {
-      // Up to 256 bytes of the group (two 128-byte lines on Apple Silicon).
-      // Integer arithmetic: slots is nullptr in an empty table.
-      constexpr size_t kBytes = kWidth * sizeof(slot_type) < 256
-                                    ? kWidth * sizeof(slot_type)
-                                    : 256;
-      const uintptr_t p = reinterpret_cast<uintptr_t>(slots) +
-                          home * kWidth * sizeof(slot_type);
-      for (size_t o = 0; o < kBytes; o += 128)
-        __builtin_prefetch(reinterpret_cast<const void*>(p + o));
-    }
-#endif
     {
       Group g = Group::Load(ctrl + home * kWidth);
       Mask m = g.Match(hh);
       while (m) {
-        const unsigned j = Group::Lane(m);
-        m &= m - 1;
         const value_type* e = reinterpret_cast<const value_type*>(
-            &slots[home * kWidth + j]);
+            &slots[home * kWidth + Group::Lane(m)]);
         if (equal(e->first, key)) return e;
+        m &= m - 1;
       }
       if (g.Match(detail::kEmpty)) return nullptr;
       if (!(overflow[home] & detail::OverflowBit(h))) return nullptr;
@@ -974,11 +969,63 @@ class flat_hash_map {
   }
 
   // Element with key, or nullptr. Never modifies the map.
+  //
+  // The inlined part handles the common cases: a hit in the home group, and
+  // a miss that the home group proves (an empty slot or a clear overflow
+  // bit), with no migration. Everything else goes to find_ptr_slow(). A
+  // small inlined part keeps callers' loops short: on Apple M2 a DRAM-bound
+  // find loop gets about 0.4 ns slower per extra instruction, since fewer
+  // finds then fit in the out-of-order window.
   SFLAT_FIND_INLINE value_type* find_ptr(const key_type& key,
                                          uint64_t h) const noexcept {
+    const size_t home = detail::Fastrange(h, cap_ / kWidth);
+#if SFLAT_PREFETCH_SLOTS
+    {
+      // Up to 256 bytes of the group (two 128-byte lines on Apple Silicon).
+      // Integer arithmetic: slots_ is nullptr in an empty table.
+      constexpr size_t kBytes = kWidth * sizeof(slot_type) < 256
+                                    ? kWidth * sizeof(slot_type)
+                                    : 256;
+      const uintptr_t p = reinterpret_cast<uintptr_t>(slots_) +
+                          home * kWidth * sizeof(slot_type);
+      for (size_t o = 0; o < kBytes; o += 128)
+        __builtin_prefetch(reinterpret_cast<const void*>(p + o));
+    }
+#endif
+    const Group g = Group::Load(ctrl_ + home * kWidth);
+    Mask m = g.Match(detail::H2(h));
+    while (m) {
+      const value_type* e = reinterpret_cast<const value_type*>(
+          &slots_[home * kWidth + Group::Lane(m)]);
+      if (equal_(e->first, key)) return const_cast<value_type*>(e);
+      m &= m - 1;
+    }
+    if (__builtin_expect(old_cap_ == 0, 1) &&
+        (g.Match(detail::kEmpty) ||
+         !(overflow_[home] & detail::OverflowBit(h))))
+      return nullptr;
+    return find_ptr_slow(key, h);
+  }
+
+  // Small trivially copyable keys go to the slow path by value, so callers
+  // need not keep the key in memory for it.
+  using slow_key_arg = typename std::conditional<
+      std::is_trivially_copyable<key_type>::value &&
+          sizeof(key_type) <= 2 * sizeof(void*),
+      key_type, const key_type&>::type;
+
+  // The rest of find_ptr(): probe past the home group, and the old table of
+  // an ongoing migration. (Probes the home group again; it is in cache.)
+  // `pure` (reads memory, writes none) lets callers keep the table fields in
+  // registers across the call. It holds as long as equal_ has no side
+  // effects, which the standard requires of KeyEqual.
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((noinline, pure))
+#endif
+  value_type* find_ptr_slow(slow_key_arg key, uint64_t h) const noexcept {
     const value_type* p =
         find_in(key, h, ctrl_, slots_, cap_, overflow_, equal_);
-    if (__builtin_expect(!p && old_cap_ != 0, 0)) p = find_in_old(key, h);
+    if (!p && old_cap_ != 0) p = find_in_old(key, h);
     return const_cast<value_type*>(p);
   }
 

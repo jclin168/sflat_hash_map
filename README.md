@@ -187,8 +187,9 @@ The back end is chosen at compile time:
 - NEON has no `movemask` instruction. The map narrows the 16-byte compare
   result with `shrn` (shift right by 4 and narrow each 16-bit pair) to a
   64-bit value with 4 bits per lane, and moves it to a general register.
-  Masking with `0x8888...` keeps one bit per lane, so the usual
-  `m &= m - 1` loop works and the lane index is `ctz(m) / 4`. With
+  Masking with `0x1111...` keeps one bit per lane, so the usual
+  `m &= m - 1` loop works and the lane index is `ctz(m) / 4`. As `ctz(m)`
+  is a multiple of 4, the slot offset is one shift. With
   `-O3` a match is `dup`, `cmeq`, `shrn`, `fmov`, `and` (the `dup` is
   hoisted out of loops for the empty and deleted values).
 - The probe loops use `Group::Mask`, `Group::Lane()` and `Group::kAll`, so
@@ -629,43 +630,43 @@ same as in the Xeon results.
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 10.8 | 20.1 | **7.7** | 35.5 | 16.1 | 25.6 | 43.7 |
-| find hit (insert order) | 8.4 | **4.8** | 7.0 | 13.1 | 6.7 | 5.9 | 15.0 |
-| find hit (random order) | 6.3 | 9.3 | 6.3 | 18.3 | **6.0** | 10.6 | 21.1 |
-| find miss | 13.5 | 7.4 | **2.4** | 16.9 | 3.2 | 3.9 | 30.6 |
-| erase | 9.8 | 10.9 | **9.2** | 46.9 | 14.7 | 28.1 | 88.5 |
-| iterate | 7.9 | **0.2** | 8.0 | 10.2 | 6.5 | 7.4 | 8.9 |
-| insert (no reserve) | 24.7 | 41.0 | **19.8** | 61.8 | 21.1 | 33.5 | 84.4 |
-| bytes/entry (steady) | **19.6** | 32.9 | 33.6 | 45.6 | 35.7 | 35.0 | 40.2 |
-| bytes/entry (growth peak) | 67.4 | 75.5 | 67.3 | 58.3 | 71.6 | **54.1** | 58.7 |
+| insert (reserved) | 10.9 | 20.2 | **7.7** | 35.7 | 16.3 | 26.0 | 43.9 |
+| find hit (insert order) | 7.3 | **4.9** | 7.0 | 13.1 | 6.8 | 6.1 | 15.2 |
+| find hit (random order) | **5.3** | 9.3 | 6.3 | 18.4 | 6.0 | 10.6 | 21.3 |
+| find miss | 12.4 | 7.5 | **2.4** | 16.9 | 3.2 | 3.9 | 31.4 |
+| erase | **9.0** | 11.1 | 9.3 | 47.6 | 14.7 | 28.9 | 89.8 |
+| iterate | 7.9 | **0.2** | 8.2 | 10.3 | 6.7 | 7.7 | 8.8 |
+| insert (no reserve) | 24.6 | 41.3 | **20.0** | 62.1 | 21.1 | 33.9 | 85.9 |
+| bytes/entry (steady) | **19.6** | 32.9 | 33.6 | 45.6 | 35.8 | 35.1 | 40.2 |
+| bytes/entry (growth peak) | 67.4 | 75.4 | 67.2 | 58.3 | 71.6 | **54.2** | 58.7 |
 
 **n = 10,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 15.6 | 35.8 | **11.9** | 69.2 | 18.3 | 32.4 | 89.6 |
-| find hit (insert order) | 18.0 | 11.3 | 11.5 | 23.3 | **9.3** | 10.0 | 24.1 |
-| find hit (random order) | 18.4 | 15.1 | 11.9 | 29.6 | **9.4** | 17.5 | 31.7 |
-| find miss | 15.8 | 11.0 | **4.7** | 26.5 | 6.9 | 9.0 | 46.8 |
-| erase | 27.3 | 27.1 | **16.8** | 92.9 | 24.8 | 56.8 | 164.2 |
-| iterate | 7.6 | **0.3** | 7.6 | 13.1 | 6.3 | 7.5 | 17.2 |
-| insert (no reserve) | 26.6 | 63.4 | **20.6** | 106.1 | 23.8 | 48.1 | 185.3 |
-| bytes/entry (steady) | **19.5** | 29.4 | 26.9 | 42.9 | 28.5 | 31.2 | 40.2 |
-| bytes/entry (growth peak) | 53.7 | 64.3 | 53.7 | 52.4 | 57.1 | **46.3** | 53.3 |
+| insert (reserved) | 15.8 | 36.0 | **12.1** | 69.8 | 18.5 | 32.7 | 90.3 |
+| find hit (insert order) | 14.2 | 11.4 | 11.6 | 23.5 | **9.4** | 10.2 | 24.5 |
+| find hit (random order) | 14.4 | 15.2 | 11.9 | 29.7 | **9.5** | 17.7 | 32.2 |
+| find miss | 14.5 | 11.1 | **4.8** | 26.7 | 7.0 | 9.1 | 47.7 |
+| erase | 24.0 | 27.1 | **17.0** | 94.5 | 25.1 | 57.3 | 164.2 |
+| iterate | 7.8 | **0.3** | 7.8 | 13.2 | 6.5 | 7.6 | 17.3 |
+| insert (no reserve) | 26.6 | 63.3 | **20.6** | 107.2 | 23.8 | 48.6 | 185.7 |
+| bytes/entry (steady) | **19.5** | 29.4 | 26.8 | 42.8 | 28.5 | 31.2 | 40.1 |
+| bytes/entry (growth peak) | 53.7 | 64.2 | 53.7 | 52.4 | 57.1 | **46.3** | 53.2 |
 
 **n = 100,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 31.8 | 43.3 | **23.4** | 85.8 | 29.2 | 54.1 | 98.8 |
-| find hit (insert order) | 21.2 | 14.2 | 14.4 | 30.1 | **12.8** | 13.9 | 25.9 |
-| find hit (random order) | 22.3 | 17.4 | 15.0 | 36.6 | **13.2** | 20.4 | 33.8 |
-| find miss | 27.1 | 12.5 | **10.5** | 34.4 | 15.7 | 17.0 | 50.0 |
-| erase | 35.3 | 32.3 | **21.9** | 103.8 | 34.0 | 76.6 | 176.3 |
-| iterate | 7.8 | **0.3** | 7.4 | 13.7 | 6.3 | 7.4 | 18.8 |
-| insert (no reserve) | 50.3 | 80.9 | **29.6** | 124.8 | 49.9 | 69.2 | 210.2 |
-| bytes/entry (steady) | **19.5** | 26.8 | 21.5 | 40.7 | 22.8 | 28.2 | 40.1 |
-| bytes/entry (growth peak) | 43.0 | 48.2 | 43.0 | 48.3 | 45.7 | **40.2** | 49.0 |
+| insert (reserved) | 32.1 | 43.6 | **23.5** | 83.5 | 29.5 | 54.1 | 98.3 |
+| find hit (insert order) | 17.3 | 14.0 | 14.9 | 27.6 | **12.8** | 13.9 | 27.0 |
+| find hit (random order) | 18.0 | 17.5 | 15.1 | 34.1 | **13.2** | 20.4 | 34.0 |
+| find miss | 24.3 | 12.6 | **10.6** | 32.0 | 15.8 | 17.0 | 50.2 |
+| erase | 32.7 | 32.3 | **21.7** | 104.8 | 34.2 | 76.5 | 176.3 |
+| iterate | 7.8 | **0.3** | 7.4 | 14.6 | 6.4 | 7.1 | 23.5 |
+| insert (no reserve) | 40.2 | 86.5 | **29.7** | 124.4 | 34.1 | 68.9 | 205.9 |
+| bytes/entry (steady) | **19.5** | 26.7 | 21.5 | 40.7 | 22.8 | 28.1 | 40.1 |
+| bytes/entry (growth peak) | 43.0 | 44.3 | 43.0 | 46.3 | 45.6 | **40.2** | 47.3 |
 
 About the growth peak on macOS: the macOS malloc keeps large freed blocks
 mapped and dirty in the process for reuse. So the old tables of a growing
@@ -675,38 +676,78 @@ table for every map. sflat has no mmap path on macOS (see "Growth memory"),
 so its page release does not help here. The steady-state row is not
 affected.
 
+#### Why find is slower on the M2, and the find tuning
+
+Measured with small test programs on this machine (10M entries, hits in
+random order):
+
+1. **One find is not slower.** With each key depending on the previous
+   result (no overlap between finds), a find costs 121 ns in sflat, 123 ns
+   in boost_flat and 112 ns in absl_flat. The difference is how many finds
+   run at the same time (latency / time per find): about 7.8 for sflat
+   (before the tuning below), 10.4 for boost_flat and 12.0 for absl_flat.
+2. **The memory pattern is not the limit.** The same accesses as sflat
+   (control bytes, then the slot) in a bare loop with sflat's array sizes
+   take about 8 ns per lookup. The 10 MB control array mostly hits in the
+   16 MiB L2 cache, so a hit has one DRAM miss.
+3. **The limit is instructions per find.** A DRAM miss takes about 110 ns,
+   so many finds must be in flight at once, and the out-of-order window
+   holds only so many instructions. In the bare loop, every extra
+   instruction per lookup adds about 0.4 ns (+10, +20, +30, +40
+   instructions: 10.6, 13.2, 17.3, 21.4, 25.9 ns). The hit path of the find
+   loop had about 42 instructions in sflat, 33 in boost_flat and 30 in
+   absl_flat. At 0.4 ns per instruction this predicts the measured gaps.
+
+The tuning therefore removes instructions from the hit path:
+
+- **Small inlined part, out-of-line rest.** `find()` inlines only the home
+  group: a hit there, or a miss that the home group proves. Probing past
+  the home group and the old table of a migration go to one `noinline`
+  function. It is marked `pure` (it writes no memory), so callers keep the
+  table fields in registers across the call. It takes small trivially
+  copyable keys by value, so callers do not store the key to the stack.
+  (Forcing the whole find inline was worse: Clang then refused to inline
+  small wrappers around `find()`, such as the benchmark's.)
+- **Lane offset in one shift.** The NEON mask keeps the low bit of each
+  4-bit lane, so `ctz` is a multiple of 4, and the compiler is told so.
+  The key compare comes before `m &= m - 1`.
+- **Slot prefetch** (`SFLAT_PREFETCH_SLOTS=1`, NEON only): `find()`
+  prefetches the home group's slots (two 128-byte lines) before it reads
+  the control bytes, so the two misses overlap. One line was slower: half
+  of the hits then miss again in the second line.
+- Tried without gain: computing H2 with a vector `umin`, telling the
+  compiler that a hit pointer is not null.
+
+Effect in the benchmark above (sflat, ns/op, before and after the tuning):
+
+| Operation | 1M | 10M | 100M |
+|---|---|---|---|
+| find hit (random order) | 6.3 to 5.3 | 18.4 to 14.4 | 22.3 to 18.0 |
+| find hit (insert order) | 8.4 to 7.3 | 18.0 to 14.2 | 21.2 to 17.3 |
+| find miss | 13.5 to 12.4 | 15.8 to 14.5 | 27.1 to 24.3 |
+| erase | 9.8 to 9.0 | 27.3 to 24.0 | 35.3 to 32.7 |
+
+The split of `find()` and the lane order are plain C++ and apply to all
+back ends; they were not measured on x86-64. The prefetch, the forced
+inlining of the small part and the NEON lane offset are NEON only.
+
 #### NEON compared with SWAR
 
-sflat only, ns/op, median of 3 runs. "NEON match" is the NEON group
-without the find tuning below. "NEON" is the default build.
+sflat only, ns/op, median of 3 runs, both before the find tuning above.
+The NEON compare is not faster than the portable SWAR group (8 bytes in a
+`uint64_t`): on the M2 a find waits for memory, not for the compare. SWAR
+is even faster for misses.
 
-| Operation | n | SWAR x8 | NEON match x16 | NEON (default) |
-|---|---|---|---|---|
-| insert (reserved) | 1M | 13.0 | 12.4 | **10.8** |
-| find hit (random order) | 1M | 7.3 | 8.5 | **6.3** |
-| find miss | 1M | **11.0** | 14.4 | 13.5 |
-| erase | 1M | 12.0 | 12.9 | **9.8** |
-| insert (reserved) | 10M | 16.7 | 16.3 | **15.6** |
-| find hit (random order) | 10M | 23.5 | 24.5 | **18.4** |
-| find miss | 10M | **13.1** | 15.6 | 15.8 |
-| erase | 10M | 32.2 | 33.4 | **27.3** |
-
-- The NEON match alone is about as fast as the portable SWAR group: on the
-  M2 the find cost is memory latency, not the compare. SWAR is even faster
-  for misses.
-- Two changes for NEON builds make finds 20 to 35 percent faster on the M2
-  (microbenchmark, random-order hits: 1M 11.2 to 8.7 ns, 10M 23.1 to 15.6
-  ns, 100M 29.3 to 19.1 ns):
-  - `find()` is forced inline. Clang did not inline it, and the call cost
-    13 to 19 percent at 10M entries.
-  - `SFLAT_PREFETCH_SLOTS=1`: `find()` prefetches the home group's slots
-    (up to 256 bytes) before it reads the control bytes. The control byte
-    miss and the slot miss then overlap instead of running one after the
-    other. Misses do not need the slots: they are up to 16 percent slower
-    than with the inlining alone (about the same as before both changes).
-    Define `SFLAT_PREFETCH_SLOTS=0` for a miss-heavy workload.
-- Both are on only for NEON. On x86-64 they were not measured, so the x86
-  build is the same as before.
+| Operation | n | SWAR x8 | NEON x16 |
+|---|---|---|---|
+| insert (reserved) | 1M | 13.0 | **12.4** |
+| find hit (random order) | 1M | **7.3** | 8.5 |
+| find miss | 1M | **11.0** | 14.4 |
+| erase | 1M | **12.0** | 12.9 |
+| insert (reserved) | 10M | 16.7 | **16.3** |
+| find hit (random order) | 10M | **23.5** | 24.5 |
+| find miss | 10M | **13.1** | 15.6 |
+| erase | 10M | **32.2** | 33.4 |
 
 #### Assessment (M2)
 
@@ -715,18 +756,20 @@ without the find tuning below. "NEON" is the default build.
   45 percent less than absl_flat, and 27 to 40 percent less than emhash8.
 - **memory (growth peak)**: equal to boost_flat at all sizes. All maps
   pay for the macOS malloc cache (see above).
-- **insert**: boost_flat is the fastest. sflat is second or third for
-  reserved inserts and 1.2 to 1.7 times slower than boost_flat without
-  reserve.
-- **find hit**: at 1M sflat is equal to boost_flat. At 10M and 100M it is
-  1.5 to 2.0 times slower than absl_flat and boost_flat. This differs from
-  the x86-64 machines: sflat was the fastest at 100M on the Xeon and at
-  all sizes on the Celeron. The cause is not known yet (load factor and
-  cache line alignment were ruled out: 0.5 and 128-byte alignment gave the
-  same times). This needs more work.
-- **find miss**: boost_flat is 2.6 to 5.6 times faster, for the same
+- **find hit (random order)**: sflat is the fastest at 1M (5.3 ns). At 10M
+  and 100M it is 1.2 times slower than boost_flat and 1.4 to 1.5 times
+  slower than absl_flat (before the tuning: 1.5 to 2.0 times). The x86-64
+  machines differ mainly because of THP: sflat uses 2 MiB pages on Linux,
+  and there was its lead at large sizes (Xeon, 100M: 43.0 ns with THP,
+  51.6 without, boost_flat 44.3). macOS has no such path.
+- **insert**: not tuned yet. boost_flat is the fastest. sflat is second
+  or third for reserved inserts and 1.2 to 1.4 times slower than
+  boost_flat without reserve.
+- **find miss**: boost_flat is 2.3 to 5.2 times faster, for the same
   reason as on the x86-64 machines (load factor 0.875, so the overflow bits
   are often set).
+- **erase**: sflat is the fastest at 1M; at 10M and 100M boost_flat is
+  1.4 to 1.5 times faster.
 
 ### Large-scale estimates (not measured)
 
