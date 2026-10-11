@@ -31,6 +31,38 @@ bool maps_equal(const sflat::flat_hash_map<K, V>& a,
   return true;
 }
 
+// The SIMD back end (AVX2, SSE2, NEON or SWAR) against a scalar reference:
+// random control bytes, every probe value, unaligned loads.
+void test_group_match() {
+  using G = sflat::detail::Group;
+  constexpr size_t W = G::kWidth;
+  std::mt19937_64 rng(777);
+  alignas(64) uint8_t buf[W + 1];
+  for (int trial = 0; trial < 2000; ++trial) {
+    // Few distinct values so lanes often match; include empty and deleted.
+    const unsigned spread = trial % 2 ? 4 : 256;
+    for (auto& b : buf) {
+      const unsigned r = rng() % spread;
+      b = r == 0 ? sflat::detail::kEmpty
+                 : r == 1 ? sflat::detail::kDeleted : static_cast<uint8_t>(r);
+    }
+    const uint8_t* p = buf + trial % 2;  // aligned and unaligned
+    const G g = G::Load(p);
+    for (unsigned c = 0; c < 256; ++c) {
+      G::Mask m = g.Match(static_cast<uint8_t>(c));
+      CHECK((m & ~G::kAll) == 0);
+      for (size_t i = 0; i < W; ++i) {
+        if (p[i] != c) continue;
+        CHECK(m != 0);
+        CHECK(G::Lane(m) == i);
+        m &= m - 1;
+      }
+      CHECK(m == 0);
+    }
+  }
+  std::printf("test_group_match OK (width %zu)\n", W);
+}
+
 // Randomized mixed workload vs std::unordered_map reference.
 void test_random_ops() {
   using Map = sflat::flat_hash_map<uint64_t, uint64_t>;
@@ -492,6 +524,7 @@ void test_custom_allocator() {
 }
 
 int main() {
+  test_group_match();
   test_api_surface();
   test_random_ops();
   test_string_keys();
