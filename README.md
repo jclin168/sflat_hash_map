@@ -328,6 +328,8 @@ in its section.
 Lower ns/op is better. Lower bytes/entry is better. **Bold** is the best
 value in the row.
 
+- Code version: main at dd209c8 (with the split find path) plus the 16-bit
+  overflow filter.
 - "insert (reserved)" includes the `reserve(n)` call.
 - "find hit (insert order)" asks for the keys in insertion order. This
   favors emhash8, which stores the elements densely in insertion order: its
@@ -340,51 +342,59 @@ value in the row.
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 74.4 | 37.3 | **27.3** | 100.4 | 38.5 | 76.8 | 122.5 |
-| find hit (insert order) | 10.6 | 9.5 | **9.2** | 22.6 | 12.0 | 15.4 | 33.7 |
-| find hit (random order) | 10.6 | 13.9 | **8.9** | 24.6 | 11.3 | 21.2 | 36.0 |
-| find miss | 18.2 | 12.6 | **5.6** | 22.7 | 9.6 | 10.9 | 41.0 |
-| erase | 14.7 | 22.5 | **11.1** | 49.7 | 16.7 | 31.9 | 78.9 |
-| iterate | 11.9 | **0.6** | 10.6 | 16.7 | 10.0 | 12.3 | 25.7 |
-| insert (no reserve) | 139.4 | 101.5 | **60.8** | 156.2 | 66.6 | 104.7 | 196.0 |
-| bytes/entry (steady) | **21.4** | 34.1 | 34.9 | 46.7 | 37.0 | 52.2 | 41.9 |
-| bytes/entry (growth peak) | 40.6 | **36.1** | 51.2 | 46.7 | 54.2 | 58.4 | 45.2 |
+| insert (reserved) | 31.2 | 43.0 | **29.3** | 108.7 | 46.9 | 86.2 | 176.3 |
+| find hit (insert order) | 12.7 | **11.5** | 11.9 | 23.2 | 16.4 | 20.7 | 33.3 |
+| find hit (random order) | 12.0 | 14.8 | **11.6** | 23.8 | 16.5 | 29.8 | 34.2 |
+| find miss | 14.4 | 13.5 | **5.7** | 23.6 | 8.0 | 11.0 | 42.5 |
+| erase | 17.2 | 24.6 | **13.7** | 59.9 | 28.2 | 59.5 | 77.2 |
+| iterate | 12.9 | **0.6** | 11.4 | 19.4 | 9.2 | 14.1 | 26.0 |
+| insert (no reserve) | 61.0 | 96.1 | **58.0** | 162.6 | 67.2 | 112.5 | 197.4 |
+| bytes/entry (steady) | **21.4** | 33.9 | 34.7 | 46.6 | 36.8 | 52.1 | 41.7 |
+| bytes/entry (growth peak) | 40.4 | **36.1** | 51.2 | 46.6 | 54.2 | 58.3 | 45.1 |
+
+At 1M the first of the three runs was slow for sflat insert (reserved 94.1
+ns, no reserve 152.0 ns); the other two runs were 29.0 to 31.2 and 59.5 to
+61.0 ns. The median hides this outlier. It is the huge page fault noise of
+this VM (see "THP on and off" below).
+
+At 1M the no-reserve table lands just after a 2x step (2.1M slots, load
+0.48). This is the reason for the 40.4 bytes/entry growth peak. It is the
+cost of 2x growth for small tables.
 
 **n = 10,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 82.4 | 56.2 | **35.1** | 176.3 | 50.2 | 97.3 | 212.9 |
-| find hit (insert order) | 23.1 | **19.5** | 25.0 | 39.4 | 28.3 | 25.7 | 51.5 |
-| find hit (random order) | 26.3 | 32.9 | **25.3** | 55.1 | 28.0 | 44.6 | 64.7 |
-| find miss | 22.2 | 20.6 | **10.8** | 49.4 | 21.1 | 22.6 | 76.8 |
-| erase | 32.6 | 47.4 | **31.7** | 115.9 | 46.5 | 85.0 | 186.3 |
-| iterate | 11.7 | **1.0** | 11.5 | 32.3 | 10.3 | 19.1 | 76.6 |
-| insert (no reserve) | 93.3 | 115.6 | **54.7** | 245.2 | 63.3 | 136.7 | 396.2 |
-| bytes/entry (steady) | **19.9** | 29.6 | 27.0 | 42.8 | 28.7 | 47.2 | 40.4 |
-| bytes/entry (growth peak) | 29.9 | **29.6** | 40.4 | 42.8 | 42.9 | 47.2 | 41.9 |
+| insert (reserved) | 42.7 | 83.9 | **37.2** | 292.3 | 53.4 | 238.3 | 250.3 |
+| find hit (insert order) | 24.7 | **20.4** | 26.3 | 42.6 | 31.8 | 33.7 | 53.5 |
+| find hit (random order) | 30.9 | 37.5 | **27.3** | 59.6 | 32.3 | 50.4 | 72.9 |
+| find miss | 23.1 | 21.8 | **11.2** | 58.1 | 14.4 | 21.5 | 84.6 |
+| erase | 41.3 | 53.3 | **34.1** | 120.2 | 44.2 | 111.8 | 209.6 |
+| iterate | 13.3 | **1.1** | 12.2 | 31.8 | 8.6 | 18.5 | 80.6 |
+| insert (no reserve) | **71.6** | 196.1 | 108.5 | 292.6 | 191.6 | 215.3 | 513.3 |
+| bytes/entry (steady) | **19.9** | 29.5 | 27.0 | 42.8 | 28.6 | 47.2 | 40.4 |
+| bytes/entry (growth peak) | 29.9 | **29.6** | 40.4 | 42.8 | 42.9 | 47.2 | 41.8 |
 
-The sflat insert rows vary a lot between runs in this VM because of huge
-page faults (see "THP on and off" below). At 1M, reserved insert was 58 to
-96 ns and no-reserve insert 61 to 183 ns. With `SFLAT_USE_THP=0` the same
-rows were stable: 30 to 33 ns and 70 to 85 ns. At 10M, reserved insert was
-37 to 84 ns.
-
-At 1M the no-reserve table lands just after a 2x step (2.1M slots, load
-0.48). This is the reason for the 40.6 bytes/entry growth peak. It is the
-cost of 2x growth for small tables.
+At 10M the no-reserve insert of the maps that use glibc malloc was 2 to 3
+times slower than in the earlier run (boost_flat 101 to 110 ns, was 54.7;
+absl_flat 183 to 201 ns, was 63.3). All three runs agree. The likely cause
+is the page fault cost of this VM at the time of the run: a first touch of
+new memory took 1.8 to 10 microseconds per 4 KiB page (bare metal: about
+0.25). Each rehash of these maps touches a new array in 4 KiB pages. sflat
+uses 2 MiB pages for large arrays, so it takes 512 times fewer faults, and
+it went from 93.3 to 71.6 ns.
 
 **n = 100,000,000**
 
 | Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
 |---|---|---|---|---|---|---|---|
-| insert (reserved) | 82.5 | 149.6 | 95.2 | 365.4 | **68.0** | 289.7 | 385.9 |
-| find hit (insert order) | 41.0 | **32.2** | 43.2 | 55.1 | 40.2 | 40.9 | 71.2 |
-| find hit (random order) | **39.0** | 51.5 | 44.3 | 78.8 | 42.3 | 66.6 | 91.1 |
-| find miss | 29.7 | 34.6 | **21.1** | 70.5 | 41.4 | 48.1 | 100.2 |
-| erase | 54.8 | 80.1 | **50.0** | 154.3 | 69.7 | 124.8 | 268.8 |
-| iterate | 11.7 | **1.1** | 11.1 | 47.0 | 10.4 | 25.3 | 120.8 |
-| insert (no reserve) | **110.6** | 224.0 | 131.0 | 447.3 | 123.9 | 320.1 | 638.0 |
+| insert (reserved) | **72.1** | 153.2 | 78.1 | 402.3 | 87.8 | 319.9 | 407.6 |
+| find hit (insert order) | 41.1 | **33.9** | 43.0 | 63.2 | 48.5 | 51.8 | 73.3 |
+| find hit (random order) | **42.8** | 52.6 | 44.4 | 87.0 | 48.8 | 79.8 | 92.6 |
+| find miss | 30.6 | 34.8 | **25.3** | 91.4 | 32.3 | 46.6 | 105.6 |
+| erase | **55.2** | 81.4 | 55.9 | 187.4 | 69.5 | 166.6 | 282.1 |
+| iterate | 13.1 | **1.1** | 12.5 | 53.0 | 8.4 | 24.4 | 106.1 |
+| insert (no reserve) | **101.1** | 249.2 | 140.5 | 493.8 | 143.5 | 392.3 | 716.7 |
 | bytes/entry (steady) | **19.5** | 26.7 | 21.5 | 40.6 | 22.8 | 44.1 | 40.1 |
 | bytes/entry (growth peak) | **23.6** | 26.7 | 32.2 | 40.6 | 34.2 | 44.1 | 40.1 |
 
@@ -425,22 +435,24 @@ larger. To turn THP off, define `SFLAT_USE_THP=0`.
 #### Honest assessment
 
 - **memory (steady state)**: sflat uses the least memory at all sizes: 9 to
-  39 percent less than boost_flat, 14 to 42 percent less than absl_flat, and
+  38 percent less than boost_flat, 14 to 42 percent less than absl_flat, and
   27 to 37 percent less than emhash8.
 - **memory (growth peak)**: at 100M sflat has the lowest peak (23.6
   bytes/entry). At 10M it is equal to emhash8 (29.9 and 29.6). At 1M the 2x
-  step makes it 40.6, more than emhash8 (36.1).
-- **insert (no reserve)**: at 100M sflat is now the fastest (110.6 ns; was
-  159.8 with 1.5x growth). At 10M it went from 166 to 93 ns. boost_flat is
-  still faster at 1M and 10M.
-- **insert (reserved)**: at 100M absl_flat is the fastest (68.0), then sflat
-  (82.5). At 1M and 10M the THP fault noise in this VM hides the real speed;
-  with THP off sflat is close to boost_flat.
-- **find hit (random order)**: sflat is the fastest at 100M (39.0 ns) and
-  within 4 to 19 percent of the best at 1M and 10M.
-- **find miss**: boost_flat is still 1.4 to 3.3 times faster. sflat fills
-  the table to 0.875, so the overflow bits are often set.
-- **erase and iterate**: not a goal. Both are within 1.4x of boost_flat.
+  step makes it 40.4, more than emhash8 (36.1).
+- **insert (reserved)**: at 100M sflat is now the fastest (72.1 ns; was
+  82.5). At 1M and 10M it is within 7 and 15 percent of boost_flat.
+- **insert (no reserve)**: sflat is the fastest at 10M and 100M (71.6 and
+  101.1 ns). At 1M it is within 6 percent of boost_flat. The 10M lead is
+  partly page fault cost in this VM (see above).
+- **find hit (random order)**: sflat is the fastest at 100M (42.8 ns), and
+  within 4 and 13 percent of boost_flat at 1M and 10M.
+- **find miss**: boost_flat is still 1.2 to 2.5 times faster. sflat fills
+  the table to 0.875; boost_flat after `reserve(n)` is only 51 to 64
+  percent full at 1M and 10M. In a separate test at about the same load
+  (no reserve, 1M) the miss was 5.6 ns for sflat and 4.2 ns for boost_flat.
+- **erase and iterate**: not a goal. Erase is the fastest at 100M; iterate
+  is within 1.6x of absl_flat.
 
 ### Intel Celeron N5105, bare metal
 
