@@ -1313,15 +1313,31 @@ class flat_hash_map {
     else
       return ctrl_traits::allocate(ctrl_alloc_, n);
   }
-  // Overflow words for ng groups, all clear.
+  // Overflow words for ng groups, all clear. A user allocator is rebound to
+  // the word type, so the words are aligned (a byte allocation need not be).
+  using ovf_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<
+      detail::Overflow>;
+  using ovf_traits = std::allocator_traits<ovf_alloc>;
   detail::Overflow* alloc_overflow(size_t ng) {
     const size_t bytes = ng * sizeof(detail::Overflow);
-    uint8_t* p = alloc_bytes(bytes);
+    detail::Overflow* p;
+    if constexpr (kOwnMemory) {
+      p = static_cast<detail::Overflow*>(
+          detail::PageAlloc(bytes, detail::kCacheLine, true));
+    } else {
+      ovf_alloc a(ctrl_alloc_);
+      p = ovf_traits::allocate(a, ng);
+    }
     std::memset(p, 0, bytes);
-    return reinterpret_cast<detail::Overflow*>(p);
+    return p;
   }
   void free_overflow(detail::Overflow* p, size_t ng) noexcept {
-    free_bytes(reinterpret_cast<uint8_t*>(p), ng * sizeof(detail::Overflow));
+    if constexpr (kOwnMemory) {
+      detail::PageFree(p, ng * sizeof(detail::Overflow), detail::kCacheLine);
+    } else if (p) {
+      ovf_alloc a(ctrl_alloc_);
+      ovf_traits::deallocate(a, p, ng);
+    }
   }
   void free_bytes(uint8_t* p, size_t n) noexcept {
     if constexpr (kOwnMemory)

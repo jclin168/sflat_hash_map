@@ -22,8 +22,8 @@
     }                                                                    \
   } while (0)
 
-template <typename K, typename V>
-bool maps_equal(const sflat::flat_hash_map<K, V>& a,
+template <typename K, typename V, typename... Rest>
+bool maps_equal(const sflat::flat_hash_map<K, V, Rest...>& a,
                 const std::unordered_map<K, V>& b) {
   if (a.size() != b.size()) return false;
   for (const auto& kv : a) {
@@ -471,6 +471,66 @@ void test_large_mixed() {
               migrating_checks);
 }
 
+// A user allocator makes the map use it for all arrays (no mmap path).
+// It counts live bytes, so a leak or a size mismatch shows up. For 1-byte
+// types it returns addresses that are 1 byte off any larger alignment
+// (allowed for such types), so an array of wider words that the map took
+// from a byte allocation would be misaligned (UBSan reports it).
+static long long g_live_bytes = 0;
+template <typename T>
+struct CountingAlloc {
+  using value_type = T;
+  static constexpr size_t kSkew = alignof(T) == 1 ? 1 : 0;
+  CountingAlloc() = default;
+  template <typename U>
+  CountingAlloc(const CountingAlloc<U>&) noexcept {}
+  T* allocate(size_t n) {
+    g_live_bytes += static_cast<long long>(n * sizeof(T));
+    char* p = std::allocator<char>().allocate(n * sizeof(T) + kSkew);
+    return reinterpret_cast<T*>(p + kSkew);
+  }
+  void deallocate(T* p, size_t n) noexcept {
+    g_live_bytes -= static_cast<long long>(n * sizeof(T));
+    std::allocator<char>().deallocate(reinterpret_cast<char*>(p) - kSkew,
+                                      n * sizeof(T) + kSkew);
+  }
+  template <typename U>
+  bool operator==(const CountingAlloc<U>&) const noexcept { return true; }
+  template <typename U>
+  bool operator!=(const CountingAlloc<U>&) const noexcept { return false; }
+};
+
+void test_custom_allocator() {
+  {
+    using A = CountingAlloc<std::pair<const uint64_t, uint64_t>>;
+    using Map = sflat::flat_hash_map<uint64_t, uint64_t, std::hash<uint64_t>,
+                                     std::equal_to<uint64_t>, A>;
+    Map m;
+    std::unordered_map<uint64_t, uint64_t> ref;
+    std::mt19937_64 rng(7);
+    for (int i = 0; i < 200000; ++i) {
+      const uint64_t k = rng() % 150000;
+      if (rng() % 4 == 0) {
+        CHECK(m.erase(k) == ref.erase(k));
+      } else {
+        m[k] = i;
+        ref[k] = i;
+      }
+    }
+    CHECK(maps_equal(m, ref));
+    for (uint64_t k = 150000; k < 160000; ++k) CHECK(m.find(k) == m.end());
+    Map c(m);
+    CHECK(maps_equal(c, ref));
+    Map mv(std::move(c));
+    CHECK(maps_equal(mv, ref));
+    CHECK(g_live_bytes > 0);
+    m.clear();
+    CHECK(m.empty());
+  }
+  CHECK(g_live_bytes == 0);
+  std::printf("test_custom_allocator OK\n");
+}
+
 int main() {
   test_group_match();
   test_api_surface();
@@ -480,6 +540,7 @@ int main() {
   test_sequential_keys();
   test_during_migration();
   test_large_mixed();
+  test_custom_allocator();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
   return 0;
 }
