@@ -317,17 +317,19 @@ boost::unordered_flat_map, absl::flat_hash_map and the node-based maps):
 - **Memory**: sflat uses the least memory in steady state on every machine
   (19.5 to 21.8 bytes/entry). On Linux at 50M to 100M entries it also has
   the lowest growth peak.
-- **Find hit (random order)**: on Linux x86-64, sflat is the fastest or
-  within 20 percent of the fastest at every size. On the M2 (no THP)
-  absl_flat and boost_flat are faster at 10M and 100M.
+- **Find hit (random order)**: on Linux x86-64, sflat is the fastest at
+  the largest size of each machine. On the Xeon VM at 1M and 10M,
+  boost_flat is faster by 3 to 42 percent. On the M2 (no THP) absl_flat
+  and boost_flat are faster at 10M and 100M.
 - **Insert**: on the Celeron and the i5, sflat is the fastest in most
-  rows. On the Xeon VM, boost_flat and absl_flat are faster at 1M and 10M
-  (huge page faults are slow in the VM). On the M2, boost_flat is the
-  fastest.
+  rows. On the Xeon VM, sflat is the fastest at 100M, and boost_flat is
+  faster at 1M and 10M (huge page faults are slow in the VM). On the M2,
+  boost_flat is the fastest.
 - On the machines with small caches and TLBs (Celeron, i5) much of the lead
   of sflat comes from transparent huge pages, not from the probing scheme.
-- **Find miss**: boost_flat is faster on every machine (on the i5-3230M,
-  with the current code, by 1.1 to 1.3 times).
+- **Find miss**: boost_flat is faster on every machine. With the current
+  code it is 1.1 to 1.3 times faster on the i5-3230M and 1.2 to 1.6 times
+  on the Xeon.
 - **Iterate**: not a goal; emhash8 is much faster.
 
 ## Correctness tests
