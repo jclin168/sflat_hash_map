@@ -10,6 +10,18 @@ incremental and gives old pages back to the kernel. This avoids a latency
 spike and keeps the growth memory peak low. The map suits large data sets
 where memory is important.
 
+## Why this project
+
+- `std::unordered_map` is too slow.
+- Other flat hash maps use too much memory. They grow 2x, so a large table
+  goes from 32 GB to 64 GB to 128 GB or more. This is not acceptable.
+- The usual use case is simple: you know the number of entries, you fill
+  the map, and then you do fast lookups. Iteration is almost never
+  necessary. Lookups of missing keys are rare.
+- Transparent huge pages (THP) can make lookups in large tables faster.
+
+These requirements are the reasons for this project.
+
 ## File structure
 
 ```
