@@ -1314,7 +1314,7 @@ class flat_hash_map {
       return ctrl_traits::allocate(ctrl_alloc_, n);
   }
   // Overflow words for ng groups, all clear. A user allocator is rebound to
-  // the word type, so the words are aligned (a byte allocator need not be).
+  // the word type, so the words are aligned (a byte allocation need not be).
   using ovf_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<
       detail::Overflow>;
   using ovf_traits = std::allocator_traits<ovf_alloc>;
