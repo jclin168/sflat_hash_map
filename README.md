@@ -16,6 +16,7 @@ where memory is important.
 include/sflat/flat_hash_map.hpp   # the only header you need
 tests/correctness.cpp             # correctness tests
 bench/bench.cpp                   # benchmark program
+BENCHMARK.md                      # benchmark results for all machines
 thirdparty/emhash/                # emhash (for comparison only, not in git)
 thirdparty/boost/                 # boost headers (optional, else system boost)
 ```
@@ -51,7 +52,7 @@ The map has three arrays.
 - **ctrl**: a control array with one byte per slot. The style follows
   SwissTable. `0xFF` means empty. `0xFE` means deleted. Values in
   `[0, 0xFD]` hold the 8-bit hash fingerprint (H2).
-- **overflow**: one 16-bit word per group (32 slots with AVX2, 16 with
+- **overflow**: one 32-bit word per group (32 slots with AVX2, 16 with
   SSE2 and NEON). Each word is a Bloom filter. See below.
 
 ### Capacity and growth
@@ -88,11 +89,13 @@ The map has three arrays.
 
 Memory formula for `uint64_t -> uint64_t`:
 ```
-bytes/entry = (16 + 1 + 2/32) / 0.875 = about 19.5
+bytes/entry = (16 + 1 + 4/16) / 0.875 = about 19.7   (SSE2, NEON)
+bytes/entry = (16 + 1 + 4/32) / 0.875 = about 19.6   (AVX2)
 ```
-The measured value is 19.5 to 21.6 bytes/entry. The difference is allocator
-overhead. With 16-byte groups (SSE2, NEON) the overflow term is 1/16, which
-adds about 0.04 bytes/entry.
+The 4 is the 32-bit overflow word of each group. The measured value is
+19.7 bytes/entry at 100M on the i5-3230M (19.5 with the older 8-bit
+overflow byte). Small tables measure up to about 22 bytes/entry; the
+difference is allocator overhead.
 
 ### Growth memory (Linux)
 
@@ -128,7 +131,7 @@ index order and release the old slots behind the cursor.
 Large tables cause many TLB misses with 4 KiB pages. The map asks for huge
 pages with `madvise(MADV_HUGEPAGE)`:
 
-- control bytes, overflow words, and slots after `reserve()`: at once;
+- control bytes, overflow bytes, and slots after `reserve()`: at once;
 - slots of a growing table: a 2 MiB page just ahead of the migration front.
   Pages far ahead of the front stay `MADV_NOHUGEPAGE`, so a rare stray write
   does not commit a full 2 MiB page;
@@ -149,6 +152,7 @@ Configuration macros (define before the include):
 | `SFLAT_GROW_1_5X_BELOW` | 10 GiB | Tables smaller than this grow 1.5x; larger tables grow 1.25x. |
 | `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
 | `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
+| `SFLAT_OVERFLOW_BITS` | 32 | Bits per group in the overflow Bloom filter: 8, 16, 32 or 64. See "Overflow word". |
 
 A custom allocator disables both. The map then uses only the allocator.
 
@@ -205,24 +209,36 @@ The map processes the hash in three steps.
    This is one 128-bit multiplication. It spreads weak hashes well, for
    example the identity hash of sequential integers.
 3. It uses the high 32 bits of the mixed hash for fastrange positioning.
-   It uses the low 8 bits for H2. It uses bits [8, 12) for the overflow bit.
+   It uses the low 8 bits for H2. It uses bits [8, 13) for the overflow bit
+   (bits [8, 8 + log2(SFLAT_OVERFLOW_BITS)) in general).
    The three parts do not overlap. This reduces correlation.
 
 ### Overflow word (fast miss)
 
-Each group has a 16-bit Bloom filter. When a key overflows from its home
-group to a later group because the home group is full, the map sets a bit
-in the home group. When `find` does not locate the key in the home group,
-it checks the bit. If the bit is clear, `find` returns a miss at once. It
-does not scan further. This technique comes from `boost::unordered_flat_map`.
-It improves miss speed by about 33 percent.
+Each group has a 32-bit Bloom filter. When a key overflows from its home
+group to a later group because the home group is full, the map sets one bit
+(chosen by the hash) in the home group's word. When `find` does not locate
+the key in the home group, a miss ends there if the home group has an empty
+slot or the key's bit is clear. Only otherwise does `find` probe the next
+groups. The idea comes from `boost::unordered_flat_map`, which keeps an
+8-bit filter inside each group.
 
-boost uses 8 bits for 15 slots. sflat groups have 32 slots (AVX2), so 8 bits
-fill up fast. At load 0.875 one miss in three finds its home group full.
-With 8 bits, 72 percent of these misses found the bit set and probed the
-next group. With 16 bits, the extra groups per miss go from 0.24 to 0.14
-and a miss is 5 to 8 percent faster (1M and 10M, after `reserve`). Insert
-and find hit do not change. The cost is one more byte per 32 slots.
+Why 32 bits: at the 0.875 load factor about 48 percent of the home groups
+are full. With an 8-bit filter, about 20 percent of the misses in a full
+group find their bit set by chance, so 9.5 percent of all misses probed a
+second group. Such a miss is expensive: its branch waits for a DRAM load,
+so a mispredict costs about one memory latency (measured on the i5-3230M:
+about 140 ns per probing miss, half of the total miss time). With 32 bits
+the share drops to 2.7 percent (64 bits: 1.4 percent). Measured on the
+i5-3230M, misses got 12 to 20 percent faster, hits did not change, and the
+cost is 0.19 bytes per slot (about 1 percent). A filter inside the control
+cache line (as in boost) was also tried: it saved no time, because the
+extra address arithmetic slowed down hits (see BENCHMARK.md, "Profiling
+on the i5-3230M").
+
+`find` reads the overflow word together with the control bytes, not only
+after they show a full group. The two loads then overlap, and the test
+"empty slot or clear bit" needs no hard-to-predict branch.
 
 `erase` does not clear overflow bits. This is conservative and correct.
 Rehash rebuilds the bits.
@@ -278,532 +294,29 @@ benefit grows with table size.
 
 ## Benchmark
 
-The benchmark has been run on three machines:
-
-- [Intel Xeon (Emerald Rapids), KVM virtual machine](#intel-xeon-emerald-rapids-kvm-virtual-machine):
-  AVX2 path, large L3 cache, 1M to 100M entries.
-- [Intel Celeron N5105, bare metal](#intel-celeron-n5105-bare-metal):
-  SSE2 path (no AVX2), small caches and TLB, 1M to 50M entries.
-- [Apple M2, MacBook Air (macOS)](#apple-m2-macbook-air-macos):
-  NEON path (ARM), 128-byte cache lines, 16 KiB pages, 1M to 100M entries.
-
-All use the same program (`bench/bench.cpp`). The Xeon and the Celeron use
-the same versions of the comparison maps; the M2 uses the versions listed
-in its section.
-
-### Intel Xeon (Emerald Rapids), KVM virtual machine
-
-#### Test environment
-
-| Item | Value |
-|------|-------|
-| Machine | KVM virtual machine (cloud) |
-| CPU | Intel Xeon @ 2.10 GHz, family 6 model 207 (5th gen Xeon Scalable, Emerald Rapids) |
-| Cores | 4 vCPU (4 cores, 1 thread per core, 1 socket) |
-| ISA | SSE4.2, AVX2, BMI2, AVX-512 |
-| Cache | L1d 48 KiB per core, L2 2 MiB per core, L3 260 MiB shared |
-| Memory | 15 GiB, no swap |
-| OS | Ubuntu 24.04.5 LTS |
-| Kernel | Linux 6.18.44 |
-| THP | `madvise` (defrag `madvise`); free page reporting on |
-| C library | glibc 2.39 |
-| Compiler | g++ 13.3.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
-
-- Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
-  boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
-  absl::flat_hash_map and absl::node_hash_map (Abseil LTS 20260817.0),
-  std::unordered_map (libstdc++ 13). They use glibc malloc without THP.
-- All maps are compiled with `-DNDEBUG`, so no debug asserts run. (The THP
-  and latency tables come from earlier runs.)
-- Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
-  child process. Memory is the child peak RSS minus the baseline (the input
-  arrays only).
-- Before each size, a warm-up child touches and frees memory. In a VM the
-  host backs guest memory on first use, which is very slow. Without the
-  warm-up, the first map in the run order pays this cost.
-- 1M and 10M: median of 3 runs. 100M: 1 run.
-
-#### Results
-
-Lower ns/op is better. Lower bytes/entry is better. **Bold** is the best
-value in the row.
-
-- Code version: main at dd209c8 (with the split find path) plus the 16-bit
-  overflow filter.
-- "insert (reserved)" includes the `reserve(n)` call.
-- "find hit (insert order)" asks for the keys in insertion order. This
-  favors emhash8, which stores the elements densely in insertion order: its
-  element reads become sequential. "find hit (random order)" is the fair
-  test.
-- "growth peak" is the peak RSS of the no-reserve test.
-- sflat grows 2x below 2 GiB, so all three sizes here use the 2x tier.
-
-**n = 1,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | 31.2 | 43.0 | **29.3** | 108.7 | 46.9 | 86.2 | 176.3 |
-| find hit (insert order) | 12.7 | **11.5** | 11.9 | 23.2 | 16.4 | 20.7 | 33.3 |
-| find hit (random order) | 12.0 | 14.8 | **11.6** | 23.8 | 16.5 | 29.8 | 34.2 |
-| find miss | 14.4 | 13.5 | **5.7** | 23.6 | 8.0 | 11.0 | 42.5 |
-| erase | 17.2 | 24.6 | **13.7** | 59.9 | 28.2 | 59.5 | 77.2 |
-| iterate | 12.9 | **0.6** | 11.4 | 19.4 | 9.2 | 14.1 | 26.0 |
-| insert (no reserve) | 61.0 | 96.1 | **58.0** | 162.6 | 67.2 | 112.5 | 197.4 |
-| bytes/entry (steady) | **21.4** | 33.9 | 34.7 | 46.6 | 36.8 | 52.1 | 41.7 |
-| bytes/entry (growth peak) | 40.4 | **36.1** | 51.2 | 46.6 | 54.2 | 58.3 | 45.1 |
-
-At 1M the first of the three runs was slow for sflat insert (reserved 94.1
-ns, no reserve 152.0 ns); the other two runs were 29.0 to 31.2 and 59.5 to
-61.0 ns. The median hides this outlier. It is the huge page fault noise of
-this VM (see "THP on and off" below).
-
-At 1M the no-reserve table lands just after a 2x step (2.1M slots, load
-0.48). This is the reason for the 40.4 bytes/entry growth peak. It is the
-cost of 2x growth for small tables.
-
-**n = 10,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | 42.7 | 83.9 | **37.2** | 292.3 | 53.4 | 238.3 | 250.3 |
-| find hit (insert order) | 24.7 | **20.4** | 26.3 | 42.6 | 31.8 | 33.7 | 53.5 |
-| find hit (random order) | 30.9 | 37.5 | **27.3** | 59.6 | 32.3 | 50.4 | 72.9 |
-| find miss | 23.1 | 21.8 | **11.2** | 58.1 | 14.4 | 21.5 | 84.6 |
-| erase | 41.3 | 53.3 | **34.1** | 120.2 | 44.2 | 111.8 | 209.6 |
-| iterate | 13.3 | **1.1** | 12.2 | 31.8 | 8.6 | 18.5 | 80.6 |
-| insert (no reserve) | **71.6** | 196.1 | 108.5 | 292.6 | 191.6 | 215.3 | 513.3 |
-| bytes/entry (steady) | **19.9** | 29.5 | 27.0 | 42.8 | 28.6 | 47.2 | 40.4 |
-| bytes/entry (growth peak) | 29.9 | **29.6** | 40.4 | 42.8 | 42.9 | 47.2 | 41.8 |
-
-At 10M the no-reserve insert of the maps that use glibc malloc was 2 to 3
-times slower than in the earlier run (boost_flat 101 to 110 ns, was 54.7;
-absl_flat 183 to 201 ns, was 63.3). All three runs agree. The likely cause
-is the page fault cost of this VM at the time of the run: a first touch of
-new memory took 1.8 to 10 microseconds per 4 KiB page (bare metal: about
-0.25). Each rehash of these maps touches a new array in 4 KiB pages. sflat
-uses 2 MiB pages for large arrays, so it takes 512 times fewer faults, and
-it went from 93.3 to 71.6 ns.
-
-**n = 100,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | **72.1** | 153.2 | 78.1 | 402.3 | 87.8 | 319.9 | 407.6 |
-| find hit (insert order) | 41.1 | **33.9** | 43.0 | 63.2 | 48.5 | 51.8 | 73.3 |
-| find hit (random order) | **42.8** | 52.6 | 44.4 | 87.0 | 48.8 | 79.8 | 92.6 |
-| find miss | 30.6 | 34.8 | **25.3** | 91.4 | 32.3 | 46.6 | 105.6 |
-| erase | **55.2** | 81.4 | 55.9 | 187.4 | 69.5 | 166.6 | 282.1 |
-| iterate | 13.1 | **1.1** | 12.5 | 53.0 | 8.4 | 24.4 | 106.1 |
-| insert (no reserve) | **101.1** | 249.2 | 140.5 | 493.8 | 143.5 | 392.3 | 716.7 |
-| bytes/entry (steady) | **19.5** | 26.7 | 21.5 | 40.6 | 22.8 | 44.1 | 40.1 |
-| bytes/entry (growth peak) | **23.6** | 26.7 | 32.2 | 40.6 | 34.2 | 44.1 | 40.1 |
-
-100M: 1 run.
-
-#### Insert latency during growth
-
-Insert 10M keys with no `reserve`. Each insert is timed. (Measured with the
-older 1.5x growth rule.)
-
-| Map | total | p99.9 | p99.99 | max |
-|-----|-------|-------|--------|-----|
-| sflat | 2.8 s | 2.2 us | 21 us | **30 ms** |
-| boost_flat | **2.1 s** | **0.5 us** | **15 us** | 163 ms |
-| emhash8 | 3.4 s | 2.3 us | 19 us | 267 ms |
-
-boost_flat and emhash8 rehash the full table in one insert. sflat spreads
-the rehash over many inserts. Its worst case is 5 to 9 times smaller. The
-remaining 30 ms is mostly huge page faults and the final `MADV_COLLAPSE`.
-
-#### THP on and off (sflat only)
-
-THP cuts TLB misses but makes each first touch of a 2 MiB page slower. This
-VM uses free page reporting, so a new huge page often needs host work too.
-On bare metal a huge page fault usually costs only the time to clear 2 MiB.
-(Measured with the older 1.5x growth rule.)
-
-| sflat, ns/op | 10M, THP off | 10M, THP on | 100M, THP off | 100M, THP on |
-|--------------|--------------|-------------|---------------|--------------|
-| insert (reserved) | **46 to 50** | 88 to 97 | 98.9 | **76.5** |
-| find hit (random order) | 31 to 33 | **27 to 31** | 51.6 | **43.0** |
-| insert (no reserve) | **99 to 102** | 108 to 167 | 197.0 | **159.8** |
-
-At 100M, THP is better in all rows. At 1M and 10M the table fits in the
-260 MiB L3 of this CPU, so the TLB gain is small and the fault cost is
-larger. To turn THP off, define `SFLAT_USE_THP=0`.
-
-#### Honest assessment
-
-- **memory (steady state)**: sflat uses the least memory at all sizes: 9 to
-  38 percent less than boost_flat, 14 to 42 percent less than absl_flat, and
-  27 to 37 percent less than emhash8.
-- **memory (growth peak)**: at 100M sflat has the lowest peak (23.6
-  bytes/entry). At 10M it is equal to emhash8 (29.9 and 29.6). At 1M the 2x
-  step makes it 40.4, more than emhash8 (36.1).
-- **insert (reserved)**: at 100M sflat is now the fastest (72.1 ns; was
-  82.5). At 1M and 10M it is within 7 and 15 percent of boost_flat.
-- **insert (no reserve)**: sflat is the fastest at 10M and 100M (71.6 and
-  101.1 ns). At 1M it is within 6 percent of boost_flat. The 10M lead is
-  partly page fault cost in this VM (see above).
-- **find hit (random order)**: sflat is the fastest at 100M (42.8 ns), and
-  within 4 and 13 percent of boost_flat at 1M and 10M.
-- **find miss**: boost_flat is still 1.2 to 2.5 times faster. sflat fills
-  the table to 0.875; boost_flat after `reserve(n)` is only 51 to 64
-  percent full at 1M and 10M. In a separate test at about the same load
-  (no reserve, 1M) the miss was 5.6 ns for sflat and 4.2 ns for boost_flat.
-- **erase and iterate**: not a goal. Erase is the fastest at 100M; iterate
-  is within 1.6x of absl_flat.
-
-### Intel Celeron N5105, bare metal
-
-#### Test environment
-
-| Item | Value |
-|------|-------|
-| Machine | Bare-metal mini PC (no virtualization) |
-| CPU | Intel Celeron N5105 @ 2.00 GHz, family 6 model 156 (Jasper Lake, Tremont cores) |
-| Cores | 4 cores, 1 thread per core, 1 socket |
-| ISA | SSE4.2, AES-NI, SHA-NI, GFNI. **No AVX, AVX2 or BMI2**, so sflat uses the SSE2 16-slot group path |
-| Cache | L1d 32 KiB per core, L2 1.5 MiB shared, L3 4 MiB shared |
-| Memory | 7 GiB usable, 1 GiB swap |
-| OS | Ubuntu 26.04.1 LTS |
-| Kernel | Linux 7.0.0-31-generic |
-| THP | `madvise` (defrag `madvise`) |
-| CPU frequency | `intel_pstate`, governor `powersave` (HWP) |
-| C library | glibc 2.43 |
-| Compiler | g++ 15.2.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
-
-- Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
-  boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
-  absl::flat_hash_map and absl::node_hash_map (Abseil LTS 20260817.0),
-  std::unordered_map (libstdc++ 15). They use glibc malloc without THP.
-- All maps are compiled with `-DNDEBUG`, so no debug asserts run.
-- Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
-  child process. Memory is the child peak RSS minus the baseline (the input
-  arrays only).
-- Before each size, a warm-up child touches and frees memory. (This matters
-  most in a VM, where the host backs guest memory on first use.)
-- 1M and 10M: median of 3 runs. The runs agree well on this bare-metal
-  machine: the sflat rows vary by less than 2 percent, except no-reserve
-  insert at 1M (141 to 156 ns). 50M: 1 run.
-- 100M is not measured. The four input arrays alone take 3.2 GB, and the
-  node-based maps need another 4 GB. This does not fit in 7 GiB.
-
-#### Results
-
-Lower ns/op is better. Lower bytes/entry is better. **Bold** is the best
-value in the row.
-
-- "insert (reserved)" includes the `reserve(n)` call.
-- "find hit (insert order)" asks for the keys in insertion order. This
-  favors emhash8, which stores the elements densely in insertion order: its
-  element reads become sequential. "find hit (random order)" is the fair
-  test.
-- "growth peak" is the peak RSS of the no-reserve test.
-- sflat grows 2x below 2 GiB, so all three sizes here use the 2x tier.
-- The L3 cache is only 4 MiB. Even the 1M tables (about 20 to 50 MB) do not
-  fit in cache, so all sizes are bound by DRAM latency and TLB misses.
-
-**n = 1,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | **67.4** | 94.5 | 92.1 | 275.2 | 105.7 | 144.3 | 382.3 |
-| find hit (insert order) | 44.1 | 44.6 | 53.8 | 67.7 | 50.5 | **42.5** | 107.3 |
-| find hit (random order) | **45.2** | 82.1 | 55.2 | 107.0 | 50.3 | 97.5 | 144.3 |
-| find miss | 32.9 | 34.7 | **14.2** | 81.3 | 41.4 | 44.9 | 161.5 |
-| erase | **70.6** | 160.2 | 92.6 | 258.0 | 87.2 | 219.7 | 453.7 |
-| iterate | 22.3 | **1.9** | 20.1 | 57.0 | 17.8 | 47.0 | 70.0 |
-| insert (no reserve) | 141.5 | 232.3 | **131.5** | 544.5 | 138.8 | 325.5 | 584.1 |
-| bytes/entry (steady) | **21.6** | 34.1 | 34.8 | 46.6 | 36.9 | 52.2 | 41.8 |
-| bytes/entry (growth peak) | 40.7 | **36.2** | 51.3 | 46.7 | 54.4 | 58.4 | 45.1 |
-
-At 1M the no-reserve table lands just after a 2x step (2.1M slots, load
-0.48). This is the reason for the 40.7 bytes/entry growth peak. It is the
-cost of 2x growth for small tables.
-
-**n = 10,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | 155.0 | **133.6** | 234.9 | 370.2 | 203.6 | 245.9 | 481.5 |
-| find hit (insert order) | 66.9 | **64.1** | 111.2 | 106.0 | 107.7 | 81.5 | 167.1 |
-| find hit (random order) | **67.8** | 136.8 | 111.1 | 193.6 | 107.1 | 206.0 | 245.9 |
-| find miss | 52.5 | 54.2 | **40.4** | 150.1 | 101.9 | 98.2 | 240.9 |
-| erase | **159.9** | 212.6 | 183.2 | 366.8 | 186.3 | 287.3 | 603.0 |
-| iterate | 22.2 | **2.0** | 18.3 | 86.8 | 16.5 | 65.4 | 95.5 |
-| insert (no reserve) | **181.8** | 299.0 | 224.2 | 664.1 | 215.1 | 471.8 | 789.7 |
-| bytes/entry (steady) | **19.9** | 29.6 | 27.0 | 42.8 | 28.7 | 47.2 | 40.4 |
-| bytes/entry (growth peak) | 29.9 | **29.6** | 40.4 | 42.8 | 42.9 | 47.2 | 41.8 |
-
-**n = 50,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | **181.1** | 234.3 | 324.5 | 489.5 | 234.9 | 288.3 | 567.9 |
-| find hit (insert order) | **71.8** | 105.1 | 196.7 | 182.0 | 194.1 | 155.0 | 260.1 |
-| find hit (random order) | **71.6** | 274.4 | 200.3 | 353.9 | 194.4 | 347.2 | 428.1 |
-| find miss | 60.4 | 99.3 | **57.9** | 272.6 | 190.0 | 186.1 | 349.3 |
-| erase | **179.0** | 285.2 | 221.4 | 492.4 | 225.0 | 370.1 | 748.0 |
-| iterate | 22.2 | **2.0** | 16.7 | 160.2 | 15.5 | 140.6 | 117.7 |
-| insert (no reserve) | **207.9** | 407.7 | 315.9 | 767.2 | 258.1 | 509.9 | 1341.0 |
-| bytes/entry (steady) | **19.6** | 26.8 | 21.5 | 40.6 | 22.8 | 44.1 | 40.7 |
-| bytes/entry (growth peak) | **23.7** | 26.7 | 32.2 | 40.6 | 34.2 | 44.1 | 56.2 |
-
-50M: 1 run.
-
-#### THP on and off (sflat only)
-
-sflat is the only map here that asks for huge pages. To separate the effect
-of THP from the effect of the map design, the same benchmark was run with
-`-DSFLAT_USE_THP=0` (sflat then uses 4 KiB pages like the other maps).
-Median of 3 runs at 1M and 10M, 1 run at 50M. The best of the other flat
-maps (boost_flat or absl_flat, from the THP-off run) is shown for reference.
-
-| ns/op | 1M THP off | 1M THP on | 10M THP off | 10M THP on | 50M THP off | 50M THP on | best other flat, 50M |
-|-------|-----------|-----------|-------------|------------|-------------|------------|----------------------|
-| insert (reserved) | 81.1 | **67.4** | 219.0 | **155.0** | 325.2 | **181.1** | 234.5 (absl_flat) |
-| find hit (random order) | 52.6 | **45.2** | 121.1 | **67.8** | 209.8 | **71.6** | 194.7 (absl_flat) |
-| insert (no reserve) | 160.1 | **141.5** | 246.1 | **181.8** | 332.5 | **207.9** | 255.2 (absl_flat) |
-
-On this machine THP is better in every row and at every size. The gain
-grows with the table: at 50M a random find is 2.9 times faster with THP.
-The Tremont core has a small TLB, so with 4 KiB pages nearly every random
-access to a large table also misses the TLB and walks the page tables.
-
-With THP off, sflat is a little slower than boost_flat and absl_flat (7 to
-14 percent on find hit at 10M and 50M, and also slower on insert). Most of the
-lead of sflat in the 10M and 50M tables above therefore comes from huge
-pages, not from the probing scheme. Other maps can get a similar gain with
-an allocator that uses huge pages, or with THP set to `always`.
-
-Unlike on the Xeon VM (where the fault cost of huge pages made small tables
-slower), there is no THP penalty on this bare-metal machine, even at 1M.
-
-#### Honest assessment
-
-- **memory (steady state)**: sflat uses the least memory at all sizes: 9 to
-  38 percent less than boost_flat, 14 to 41 percent less than absl_flat, and
-  27 to 37 percent less than emhash8.
-- **memory (growth peak)**: at 50M sflat has the lowest peak (23.7
-  bytes/entry). At 10M it is equal to emhash8 (29.9 and 29.6). At 1M the 2x
-  step makes it 40.7, more than emhash8 (36.2).
-- **find hit (random order)**: sflat is the fastest at all sizes (45, 68
-  and 72 ns). At 10M and 50M this is mainly the THP effect (see above).
-  With THP off it is 7 to 14 percent slower than absl_flat.
-- **insert**: sflat is the fastest with reserve at 1M and 50M, and without
-  reserve at 10M and 50M. emhash8 is faster with reserve at 10M, and
-  boost_flat without reserve at 1M. With THP off, absl_flat is faster on
-  insert at 10M and 50M.
-- **find miss**: boost_flat is still the fastest at all sizes (2.3 times
-  faster at 1M, about equal at 50M). sflat fills the table to 0.875, so the
-  overflow bits are often set.
-- **erase**: sflat is the fastest at all sizes here.
-- **iterate**: not a goal. sflat is up to 1.4 times slower than boost_flat
-  and absl_flat.
-- **SSE2 only**: this CPU has no AVX2, so sflat probes 16-slot groups. The
-  results show that the SSE2 path is competitive.
-
-### Apple M2, MacBook Air (macOS)
-
-#### Test environment
-
-| Item | Value |
-|------|-------|
-| Machine | MacBook Air (Mac14,2), fanless, on AC power |
-| CPU | Apple M2, 8 cores (4 performance, 4 efficiency) |
-| ISA | ARMv8.6-A, NEON (sflat uses the NEON x16 back end) |
-| Cache | P cores: L1d 128 KiB per core, L2 16 MiB shared. E cores: L1d 64 KiB, L2 4 MiB. 128-byte cache lines |
-| Memory | 16 GiB LPDDR5 (unified), 16 KiB pages |
-| OS | macOS 26.6.2 (25G83) |
-| Compiler | Apple clang 21.0.0, libc++, `-O3 -mcpu=native -std=c++17 -DNDEBUG` |
-
-- Comparison targets: emhash8 (upstream commit 801d02a),
-  boost::unordered_flat_map and boost::unordered_map (Boost 1.86.0),
-  absl::flat_hash_map and absl::node_hash_map (Abseil 20260107.1 from
-  Homebrew), std::unordered_map (libc++). All use the macOS system malloc.
-- Same program and method as on the Xeon (`bench/bench.cpp`). On macOS
-  `ru_maxrss` is in bytes; the benchmark converts it.
-- 1M and 10M: median of 3 runs. 100M: 1 run.
-- The process is not pinned to a core type. macOS runs it on the
-  performance cores while they are free.
-
-Build command (Abseil from Homebrew):
-
-```bash
-A=$(brew --prefix abseil)
-clang++ -std=c++17 -O3 -mcpu=native -DNDEBUG -DHAS_ABSL \
-  -I include -I thirdparty/emhash/include -I thirdparty/boost/include \
-  -I $A/include bench/bench.cpp -L$A/lib \
-  -labsl_hash -labsl_city -labsl_raw_hash_set -labsl_hashtablez_sampler \
-  -o bench_m2
-./bench_m2 1000000 10000000 100000000
-```
-
-#### Results
-
-Lower is better. **Bold** is the best value in the row. The rows mean the
-same as in the Xeon results.
-
-**n = 1,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | 10.9 | 20.2 | **7.7** | 35.7 | 16.3 | 26.0 | 43.9 |
-| find hit (insert order) | 7.3 | **4.9** | 7.0 | 13.1 | 6.8 | 6.1 | 15.2 |
-| find hit (random order) | **5.3** | 9.3 | 6.3 | 18.4 | 6.0 | 10.6 | 21.3 |
-| find miss | 12.4 | 7.5 | **2.4** | 16.9 | 3.2 | 3.9 | 31.4 |
-| erase | **9.0** | 11.1 | 9.3 | 47.6 | 14.7 | 28.9 | 89.8 |
-| iterate | 7.9 | **0.2** | 8.2 | 10.3 | 6.7 | 7.7 | 8.8 |
-| insert (no reserve) | 24.6 | 41.3 | **20.0** | 62.1 | 21.1 | 33.9 | 85.9 |
-| bytes/entry (steady) | **19.6** | 32.9 | 33.6 | 45.6 | 35.8 | 35.1 | 40.2 |
-| bytes/entry (growth peak) | 67.4 | 75.4 | 67.2 | 58.3 | 71.6 | **54.2** | 58.7 |
-
-**n = 10,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | 15.8 | 36.0 | **12.1** | 69.8 | 18.5 | 32.7 | 90.3 |
-| find hit (insert order) | 14.2 | 11.4 | 11.6 | 23.5 | **9.4** | 10.2 | 24.5 |
-| find hit (random order) | 14.4 | 15.2 | 11.9 | 29.7 | **9.5** | 17.7 | 32.2 |
-| find miss | 14.5 | 11.1 | **4.8** | 26.7 | 7.0 | 9.1 | 47.7 |
-| erase | 24.0 | 27.1 | **17.0** | 94.5 | 25.1 | 57.3 | 164.2 |
-| iterate | 7.8 | **0.3** | 7.8 | 13.2 | 6.5 | 7.6 | 17.3 |
-| insert (no reserve) | 26.6 | 63.3 | **20.6** | 107.2 | 23.8 | 48.6 | 185.7 |
-| bytes/entry (steady) | **19.5** | 29.4 | 26.8 | 42.8 | 28.5 | 31.2 | 40.1 |
-| bytes/entry (growth peak) | 53.7 | 64.2 | 53.7 | 52.4 | 57.1 | **46.3** | 53.2 |
-
-**n = 100,000,000**
-
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | 32.1 | 43.6 | **23.5** | 83.5 | 29.5 | 54.1 | 98.3 |
-| find hit (insert order) | 17.3 | 14.0 | 14.9 | 27.6 | **12.8** | 13.9 | 27.0 |
-| find hit (random order) | 18.0 | 17.5 | 15.1 | 34.1 | **13.2** | 20.4 | 34.0 |
-| find miss | 24.3 | 12.6 | **10.6** | 32.0 | 15.8 | 17.0 | 50.2 |
-| erase | 32.7 | 32.3 | **21.7** | 104.8 | 34.2 | 76.5 | 176.3 |
-| iterate | 7.8 | **0.3** | 7.4 | 14.6 | 6.4 | 7.1 | 23.5 |
-| insert (no reserve) | 40.2 | 86.5 | **29.7** | 124.4 | 34.1 | 68.9 | 205.9 |
-| bytes/entry (steady) | **19.5** | 26.7 | 21.5 | 40.7 | 22.8 | 28.1 | 40.1 |
-| bytes/entry (growth peak) | 43.0 | 44.3 | 43.0 | 46.3 | 45.6 | **40.2** | 47.3 |
-
-About the growth peak on macOS: the macOS malloc keeps large freed blocks
-mapped and dirty in the process for reuse. So the old tables of a growing
-map stay in the peak RSS (and in the physical footprint, which was checked
-too) after the map frees them. This makes the growth peak about 2x the final
-table for every map. sflat has no mmap path on macOS (see "Growth memory"),
-so its page release does not help here. The steady-state row is not
-affected.
-
-#### Why find is slower on the M2, and the find tuning
-
-Measured with small test programs on this machine (10M entries, hits in
-random order):
-
-1. **One find is not slower.** With each key depending on the previous
-   result (no overlap between finds), a find costs 121 ns in sflat, 123 ns
-   in boost_flat and 112 ns in absl_flat. The difference is how many finds
-   run at the same time (latency / time per find): about 7.8 for sflat
-   (before the tuning below), 10.4 for boost_flat and 12.0 for absl_flat.
-2. **The memory pattern is not the limit.** The same accesses as sflat
-   (control bytes, then the slot) in a bare loop with sflat's array sizes
-   take about 8 ns per lookup. The 10 MB control array mostly hits in the
-   16 MiB L2 cache, so a hit has one DRAM miss.
-3. **The limit is instructions per find.** A DRAM miss takes about 110 ns,
-   so many finds must be in flight at once, and the out-of-order window
-   holds only so many instructions. In the bare loop, every extra
-   instruction per lookup adds about 0.4 ns (+10, +20, +30, +40
-   instructions: 10.6, 13.2, 17.3, 21.4, 25.9 ns). The hit path of the find
-   loop had about 42 instructions in sflat, 33 in boost_flat and 30 in
-   absl_flat. At 0.4 ns per instruction this predicts the measured gaps.
-
-The tuning therefore removes instructions from the hit path:
-
-- **Small inlined part, out-of-line rest.** `find()` inlines only the home
-  group: a hit there, or a miss that the home group proves. Probing past
-  the home group and the old table of a migration go to one `noinline`
-  function. It is marked `pure` (it writes no memory), so callers keep the
-  table fields in registers across the call. It takes small trivially
-  copyable keys by value, so callers do not store the key to the stack.
-  (Forcing the whole find inline was worse: Clang then refused to inline
-  small wrappers around `find()`, such as the benchmark's.)
-- **Lane offset in one shift.** The NEON mask keeps the low bit of each
-  4-bit lane, so `ctz` is a multiple of 4, and the compiler is told so.
-  The key compare comes before `m &= m - 1`.
-- **Slot prefetch** (`SFLAT_PREFETCH_SLOTS=1`, NEON only): `find()`
-  prefetches the home group's slots (two 128-byte lines) before it reads
-  the control bytes, so the two misses overlap. One line was slower: half
-  of the hits then miss again in the second line.
-- Tried without gain: computing H2 with a vector `umin`, telling the
-  compiler that a hit pointer is not null.
-
-Effect in the benchmark above (sflat, ns/op, before and after the tuning):
-
-| Operation | 1M | 10M | 100M |
-|---|---|---|---|
-| find hit (random order) | 6.3 to 5.3 | 18.4 to 14.4 | 22.3 to 18.0 |
-| find hit (insert order) | 8.4 to 7.3 | 18.0 to 14.2 | 21.2 to 17.3 |
-| find miss | 13.5 to 12.4 | 15.8 to 14.5 | 27.1 to 24.3 |
-| erase | 9.8 to 9.0 | 27.3 to 24.0 | 35.3 to 32.7 |
-
-The split of `find()` and the lane order are plain C++ and apply to all
-back ends; they were not measured on x86-64. The prefetch, the forced
-inlining of the small part and the NEON lane offset are NEON only.
-
-#### NEON compared with SWAR
-
-sflat only, ns/op, median of 3 runs, both before the find tuning above.
-The NEON compare is not faster than the portable SWAR group (8 bytes in a
-`uint64_t`): on the M2 a find waits for memory, not for the compare. SWAR
-is even faster for misses.
-
-| Operation | n | SWAR x8 | NEON x16 |
-|---|---|---|---|
-| insert (reserved) | 1M | 13.0 | **12.4** |
-| find hit (random order) | 1M | **7.3** | 8.5 |
-| find miss | 1M | **11.0** | 14.4 |
-| erase | 1M | **12.0** | 12.9 |
-| insert (reserved) | 10M | 16.7 | **16.3** |
-| find hit (random order) | 10M | **23.5** | 24.5 |
-| find miss | 10M | **13.1** | 15.6 |
-| erase | 10M | **32.2** | 33.4 |
-
-#### Assessment (M2)
-
-- **memory (steady state)**: sflat uses the least memory at all sizes
-  (19.5 to 19.6 bytes/entry): 9 to 42 percent less than boost_flat, 14 to
-  45 percent less than absl_flat, and 27 to 40 percent less than emhash8.
-- **memory (growth peak)**: equal to boost_flat at all sizes. All maps
-  pay for the macOS malloc cache (see above).
-- **find hit (random order)**: sflat is the fastest at 1M (5.3 ns). At 10M
-  and 100M it is 1.2 times slower than boost_flat and 1.4 to 1.5 times
-  slower than absl_flat (before the tuning: 1.5 to 2.0 times). The x86-64
-  machines differ mainly because of THP: sflat uses 2 MiB pages on Linux,
-  and there was its lead at large sizes (Xeon, 100M: 43.0 ns with THP,
-  51.6 without, boost_flat 44.3). macOS has no such path.
-- **insert**: not tuned yet. boost_flat is the fastest. sflat is second
-  or third for reserved inserts and 1.2 to 1.4 times slower than
-  boost_flat without reserve.
-- **find miss**: boost_flat is 2.3 to 5.2 times faster, for the same
-  reason as on the x86-64 machines (load factor 0.875, so the overflow bits
-  are often set).
-- **erase**: sflat is the fastest at 1M; at 10M and 100M boost_flat is
-  1.4 to 1.5 times faster.
-
-### Large-scale estimates (not measured)
-
-The table below extrapolates from the measured steady-state bytes/entry.
-
-| Entries | sflat (about 20 B/entry) | boost_flat (about 30 B/entry) |
-|---------|--------------------------|--------------------------|
-| 100M    | about 2.0 GB             | about 3.0 GB             |
-| 1B      | about 20 GB              | about 30 GB              |
-| 100B    | about 2.0 TB             | about 3.0 TB             |
-
-With page release, the growth peak is about the size of the new table
-(2x, 1.5x or 1.25x of the old table) plus the control bytes. The measured
-peak is 23.6 bytes/entry at 100M (Xeon) and 23.7 at 50M (Celeron). The actual values depend on the allocator and on the key
-and value sizes.
+The full results are in [BENCHMARK.md](BENCHMARK.md). It covers four
+machines: an Intel Xeon KVM virtual machine (AVX2), an Intel Celeron N5105
+and an Intel Core i5-3230M on bare metal (SSE2), and an Apple M2 (NEON). It
+also has the build and run steps.
+
+In short (`uint64_t -> uint64_t`, random keys, compared with emhash8,
+boost::unordered_flat_map, absl::flat_hash_map and the node-based maps):
+
+- **Memory**: sflat uses the least memory in steady state on every machine
+  (19.5 to 21.8 bytes/entry). On Linux at 50M to 100M entries it also has
+  the lowest growth peak.
+- **Find hit (random order)**: on Linux x86-64, sflat is the fastest or
+  within 20 percent of the fastest at every size. On the M2 (no THP)
+  absl_flat and boost_flat are faster at 10M and 100M.
+- **Insert**: on the Celeron and the i5, sflat is the fastest in most
+  rows. On the Xeon VM, boost_flat and absl_flat are faster at 1M and 10M
+  (huge page faults are slow in the VM). On the M2, boost_flat is the
+  fastest.
+- On the machines with small caches and TLBs (Celeron, i5) much of the lead
+  of sflat comes from transparent huge pages, not from the probing scheme.
+- **Find miss**: boost_flat is faster on every machine (on the i5-3230M,
+  with the current code, by 1.1 to 1.3 times).
+- **Iterate**: not a goal; emhash8 is much faster.
 
 ## Correctness tests
 
@@ -839,8 +352,8 @@ not re-run there.)
 
 ## License
 
-This project uses the GNU General Public License v3.0. The LICENSE file
-has the full text.
+This project uses the Apache License 2.0. The LICENSE file has the full
+text. Each source file has an `SPDX-License-Identifier: Apache-2.0` line.
 
 The license covers `include/`, `tests/`, and `bench/`. `thirdparty/` holds
 third-party code. Each third-party item keeps its original license (emhash,

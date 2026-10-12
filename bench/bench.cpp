@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jian-Cheng Lin
 // Benchmark: sflat::flat_hash_map vs emhash8::HashMap vs
 // boost::unordered_flat_map vs boost::unordered_map vs std::unordered_map,
 // and with -DHAS_ABSL also absl::flat_hash_map and absl::node_hash_map.

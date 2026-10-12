@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jian-Cheng Lin
 #pragma once
 //
 // sflat::flat_hash_map
@@ -23,8 +25,8 @@
 //
 // Layout: one control byte per slot (SwissTable-style: H2 in [0,0xFD],
 // 0xFF = empty, 0xFE = deleted) stored in a dense array, a separate slot array
-// (std::pair<const Key, T> in aligned raw storage), and one 16-bit overflow
-// word per group.
+// (std::pair<const Key, T> in aligned raw storage), and one overflow Bloom
+// word per group (SFLAT_OVERFLOW_BITS, default 32).
 
 #include <cassert>
 #include <cstddef>
@@ -177,16 +179,35 @@ inline size_t Fastrange(uint64_t h, size_t n) noexcept {
   return (size_t)(((uint64_t)(uint32_t)n * (uint32_t)(h >> 32)) >> 32);
 }
 
-// Per-group overflow Bloom bit: when a key's home group is full and the key
-// spills to a later group, set this bit on the home group. Find can then
-// terminate a miss after the home group if the bit is clear.
-// 16 bits per group: a 32-slot group at 0.875 load often spills, and 8 bits
-// fill up fast (a miss then probes the next group).
-// Uses hash bits [8,12), disjoint from H2 bits [0,8) and position bits [32,64).
-using OverflowWord = uint16_t;
-inline OverflowWord OverflowBit(uint64_t h) noexcept {
-  return static_cast<OverflowWord>(1u << ((h >> 8) & 15u));
+// Per-group overflow Bloom word: when a key's home group is full and the key
+// spills to a later group, set one bit (chosen by the hash) in the home
+// group's word. Find can then end a miss after the home group if the bit is
+// clear. More bits mean fewer misses that must probe a second group, and
+// such a miss is expensive: its branch depends on a DRAM load, so a
+// mispredict costs about a memory latency.
+// Uses hash bits [8, 8 + log2(bits)), disjoint from H2 bits [0,8) and
+// position bits [32,64).
+#if !defined(SFLAT_OVERFLOW_BITS)
+#define SFLAT_OVERFLOW_BITS 32
+#endif
+#if SFLAT_OVERFLOW_BITS == 8
+using Overflow = uint8_t;
+#elif SFLAT_OVERFLOW_BITS == 16
+using Overflow = uint16_t;
+#elif SFLAT_OVERFLOW_BITS == 32
+using Overflow = uint32_t;
+#elif SFLAT_OVERFLOW_BITS == 64
+using Overflow = uint64_t;
+#else
+#error "SFLAT_OVERFLOW_BITS must be 8, 16, 32 or 64"
+#endif
+inline Overflow OverflowBit(uint64_t h) noexcept {
+  return static_cast<Overflow>(
+      Overflow{1} << ((h >> 8) & (SFLAT_OVERFLOW_BITS - 1)));
 }
+// Overflow word of an empty table (capacity 0). Its group is all empty, so
+// the value does not matter; it is never written.
+inline constexpr Overflow kEmptyOverflow = 0;
 
 inline unsigned Ctz(uint32_t x) noexcept {
 #if defined(_MSC_VER)
@@ -827,7 +848,7 @@ class flat_hash_map {
     huge_hint_ = other.huge_hint_;
     other.slots_ = nullptr;
     other.ctrl_ = empty_ctrl();
-    other.overflow_ = nullptr;
+    other.overflow_ = empty_overflow();
     other.cap_ = 0;
     other.size_ = 0;
     other.deleted_ = 0;
@@ -872,12 +893,43 @@ class flat_hash_map {
 
   // First full slot at unified index i or later, or nullptr.
   value_type* first_full_from(size_t i) const noexcept {
-    for (; i < cap_; ++i)
-      if (detail::IsFull(ctrl_[i])) return const_cast<value_type*>(slot_at(i));
-    for (; i < cap_ + old_cap_; ++i)
-      if (detail::IsFull(old_ctrl_[i - cap_]))
-        return const_cast<value_type*>(slot_at(i));
+    if (i < cap_) {
+      if (const slot_type* s = first_full_in(ctrl_, slots_, cap_, i))
+        return const_cast<value_type*>(
+            reinterpret_cast<const value_type*>(static_cast<const void*>(s)));
+      i = cap_;
+    }
+    if (const slot_type* s = first_full_in(old_ctrl_, old_slots_, old_cap_, i - cap_))
+      return const_cast<value_type*>(
+          reinterpret_cast<const value_type*>(static_cast<const void*>(s)));
     return nullptr;
+  }
+
+  // First full slot at index i or later of one table, or nullptr. Scans a
+  // group at a time: a byte loop mispredicts on almost every slot when full
+  // and free slots are mixed (e.g. after many erases).
+  static const slot_type* first_full_in(const uint8_t* ctrl,
+                                        const slot_type* slots, size_t cap,
+                                        size_t i) noexcept {
+    if (i >= cap) return nullptr;
+    size_t g = i / kWidth * kWidth;
+    Mask m = full_mask(Group::Load(ctrl + g)) &
+             (Group::kAll << ((i - g) << Group::kShift));
+    for (;;) {
+      if (m) return &slots[g + Group::Lane(m)];
+      g += kWidth;
+      if (g >= cap) return nullptr;
+      m = full_mask(Group::Load(ctrl + g));
+    }
+  }
+
+  // Lanes of a group that hold an element.
+  static Mask full_mask(const Group& g) noexcept {
+    return ~(g.Match(detail::kEmpty) | g.Match(detail::kDeleted)) & Group::kAll;
+  }
+
+  static detail::Overflow* empty_overflow() noexcept {
+    return const_cast<detail::Overflow*>(&detail::kEmptyOverflow);
   }
 
   static uint8_t* empty_ctrl() noexcept {
@@ -899,7 +951,7 @@ class flat_hash_map {
   // have ctrl == empty_ctrl().
   static const value_type* find_in(const key_type& key, uint64_t h,
                                    const uint8_t* ctrl, const slot_type* slots,
-                                   size_t cap, const detail::OverflowWord* overflow,
+                                   size_t cap, const detail::Overflow* overflow,
                                    const KeyEqual& equal) noexcept {
     const uint8_t hh = detail::H2(h);
     const size_t ng = cap / kWidth;
@@ -996,6 +1048,10 @@ class flat_hash_map {
     }
 #endif
     const Group g = Group::Load(ctrl_ + home * kWidth);
+    // Read the overflow word now, not only after the control bytes say the
+    // group is full (about half of the groups at max load): the two loads
+    // then overlap, and the miss test below has no hard-to-predict branch.
+    const detail::Overflow ovf = overflow_[home] & detail::OverflowBit(h);
     Mask m = g.Match(detail::H2(h));
     while (m) {
       const value_type* e = reinterpret_cast<const value_type*>(
@@ -1004,8 +1060,7 @@ class flat_hash_map {
       m &= m - 1;
     }
     if (__builtin_expect(old_cap_ == 0, 1) &&
-        (g.Match(detail::kEmpty) ||
-         !(overflow_[home] & detail::OverflowBit(h))))
+        ((g.Match(detail::kEmpty) != 0) | (ovf == 0)))
       return nullptr;
     return find_ptr_slow(key, h);
   }
@@ -1258,36 +1313,37 @@ class flat_hash_map {
     else
       return ctrl_traits::allocate(ctrl_alloc_, n);
   }
+  // Overflow words for ng groups, all clear. A user allocator is rebound to
+  // the word type, so the words are aligned (a byte allocator need not be).
+  using ovf_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<
+      detail::Overflow>;
+  using ovf_traits = std::allocator_traits<ovf_alloc>;
+  detail::Overflow* alloc_overflow(size_t ng) {
+    const size_t bytes = ng * sizeof(detail::Overflow);
+    detail::Overflow* p;
+    if constexpr (kOwnMemory) {
+      p = static_cast<detail::Overflow*>(
+          detail::PageAlloc(bytes, detail::kCacheLine, true));
+    } else {
+      ovf_alloc a(ctrl_alloc_);
+      p = ovf_traits::allocate(a, ng);
+    }
+    std::memset(p, 0, bytes);
+    return p;
+  }
+  void free_overflow(detail::Overflow* p, size_t ng) noexcept {
+    if constexpr (kOwnMemory) {
+      detail::PageFree(p, ng * sizeof(detail::Overflow), detail::kCacheLine);
+    } else if (p) {
+      ovf_alloc a(ctrl_alloc_);
+      ovf_traits::deallocate(a, p, ng);
+    }
+  }
   void free_bytes(uint8_t* p, size_t n) noexcept {
     if constexpr (kOwnMemory)
       detail::PageFree(p, n, detail::kCacheLine);
     else if (p)
       ctrl_traits::deallocate(ctrl_alloc_, p, n);
-  }
-  // Zeroed overflow words for ng groups.
-  using ovf_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<
-      detail::OverflowWord>;
-  using ovf_traits = std::allocator_traits<ovf_alloc>;
-  detail::OverflowWord* alloc_overflow(size_t ng) {
-    const size_t n = ng * sizeof(detail::OverflowWord);
-    detail::OverflowWord* p;
-    if constexpr (kOwnMemory) {
-      p = static_cast<detail::OverflowWord*>(
-          detail::PageAlloc(n, detail::kCacheLine, true));
-    } else {
-      ovf_alloc a(ctrl_alloc_);
-      p = ovf_traits::allocate(a, ng);
-    }
-    std::memset(p, 0, n);
-    return p;
-  }
-  void free_overflow(detail::OverflowWord* p, size_t ng) noexcept {
-    if constexpr (kOwnMemory) {
-      detail::PageFree(p, ng * sizeof(detail::OverflowWord), detail::kCacheLine);
-    } else if (p) {
-      ovf_alloc a(ctrl_alloc_);
-      ovf_traits::deallocate(a, p, ng);
-    }
   }
 
   // ------------------------------------------------------------ growth
@@ -1304,7 +1360,7 @@ class flat_hash_map {
     uint8_t* new_ctrl = alloc_bytes(new_cap);
     std::memset(new_ctrl, detail::kEmpty, new_cap);
     const size_t new_ng = new_cap / kWidth;
-    detail::OverflowWord* new_overflow = alloc_overflow(new_ng);
+    detail::Overflow* new_overflow = alloc_overflow(new_ng);
     // Move current to old.
     old_slots_ = slots_;
     old_ctrl_ = ctrl_;
@@ -1426,7 +1482,7 @@ class flat_hash_map {
     new_cap = align_cap(new_cap);
     slot_type* new_slots = nullptr;
     uint8_t* new_ctrl = empty_ctrl();
-    detail::OverflowWord* new_overflow = nullptr;
+    detail::Overflow* new_overflow = empty_overflow();
     if (new_cap) {
       new_slots = alloc_slots(new_cap, true);
       new_ctrl = alloc_bytes(new_cap);
@@ -1511,7 +1567,7 @@ class flat_hash_map {
     free_old();
     if (cap_) {
       std::memset(ctrl_, detail::kEmpty, cap_);
-      std::memset(overflow_, 0, cap_ / kWidth * sizeof(detail::OverflowWord));
+      std::memset(overflow_, 0, cap_ / kWidth * sizeof(detail::Overflow));
     }
     size_ = 0;
     deleted_ = 0;
@@ -1831,7 +1887,7 @@ class flat_hash_map {
   // ------------------------------------------------------------------- data
   slot_type* slots_ = nullptr;
   uint8_t* ctrl_ = empty_ctrl();  // size cap_; H2 / kEmpty / kDeleted
-  detail::OverflowWord* overflow_ = nullptr;  // size cap_/kWidth; Bloom bits
+  detail::Overflow* overflow_ = empty_overflow();  // size cap_/kWidth; per-group overflow Bloom bits
   size_type cap_ = 0;
   size_type size_ = 0;
   size_type deleted_ = 0;  // tombstones in the current table
@@ -1846,7 +1902,7 @@ class flat_hash_map {
   // in small steps to avoid latency spikes.
   slot_type* old_slots_ = nullptr;
   uint8_t* old_ctrl_ = nullptr;
-  detail::OverflowWord* old_overflow_ = nullptr;
+  detail::Overflow* old_overflow_ = nullptr;
   size_type old_cap_ = 0;
   size_type mig_pos_ = 0;       // next old slot to migrate
   size_type old_released_ = 0;  // old slot bytes given back to the kernel
