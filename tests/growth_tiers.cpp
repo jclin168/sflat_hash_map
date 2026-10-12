@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jian-Cheng Lin
 // Growth tiers with small limits, so the test needs little memory.
 // 16-byte slots + 1 control byte = 17 bytes per slot:
 //   below 340 KB (20000 slots) the table grows 2x,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jian-Cheng Lin
 // Correctness tests for sflat::flat_hash_map against std::unordered_map.
 #include <sflat/flat_hash_map.hpp>
 

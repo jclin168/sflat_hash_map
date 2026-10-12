@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jian-Cheng Lin
 #pragma once
 //
 // sflat::flat_hash_map
