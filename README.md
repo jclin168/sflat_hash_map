@@ -52,8 +52,8 @@ The map has three arrays.
 - **ctrl**: a control array with one byte per slot. The style follows
   SwissTable. `0xFF` means empty. `0xFE` means deleted. Values in
   `[0, 0xFD]` hold the 8-bit hash fingerprint (H2).
-- **overflow**: one byte per group (32 slots with AVX2, 16 with SSE2 and
-  NEON). Each byte is a Bloom filter. See below.
+- **overflow**: one 32-bit word per group (32 slots with AVX2, 16 with
+  SSE2 and NEON). Each word is a Bloom filter. See below.
 
 ### Capacity and growth
 
@@ -89,11 +89,13 @@ The map has three arrays.
 
 Memory formula for `uint64_t -> uint64_t`:
 ```
-bytes/entry = (16 + 1 + 1/32) / 0.875 = about 19.5
+bytes/entry = (16 + 1 + 4/16) / 0.875 = about 19.7   (SSE2, NEON)
+bytes/entry = (16 + 1 + 4/32) / 0.875 = about 19.6   (AVX2)
 ```
-The measured value is 19.5 to 21.6 bytes/entry. The difference is allocator
-overhead. With 16-byte groups (SSE2, NEON) the overflow term is 1/16, which
-adds about 0.04 bytes/entry.
+The 4 is the 32-bit overflow word of each group. The measured value is
+19.7 bytes/entry at 100M on the i5-3230M (19.5 with the older 8-bit
+overflow byte). Small tables measure up to about 22 bytes/entry; the
+difference is allocator overhead.
 
 ### Growth memory (Linux)
 
@@ -150,6 +152,7 @@ Configuration macros (define before the include):
 | `SFLAT_GROW_1_5X_BELOW` | 10 GiB | Tables smaller than this grow 1.5x; larger tables grow 1.25x. |
 | `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
 | `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
+| `SFLAT_OVERFLOW_BITS` | 32 | Bits per group in the overflow Bloom filter: 8, 16, 32 or 64. See "Overflow word". |
 
 A custom allocator disables both. The map then uses only the allocator.
 
@@ -206,17 +209,36 @@ The map processes the hash in three steps.
    This is one 128-bit multiplication. It spreads weak hashes well, for
    example the identity hash of sequential integers.
 3. It uses the high 32 bits of the mixed hash for fastrange positioning.
-   It uses the low 8 bits for H2. It uses bits [8, 11) for the overflow bit.
+   It uses the low 8 bits for H2. It uses bits [8, 13) for the overflow bit
+   (bits [8, 8 + log2(SFLAT_OVERFLOW_BITS)) in general).
    The three parts do not overlap. This reduces correlation.
 
-### Overflow byte (fast miss)
+### Overflow word (fast miss)
 
-Each group has a one-byte Bloom filter. When a key overflows from its home
-group to a later group because the home group is full, the map sets a bit
-in the home group. When `find` does not locate the key in the home group,
-it checks the bit. If the bit is clear, `find` returns a miss at once. It
-does not scan further. This technique comes from `boost::unordered_flat_map`.
-It improves miss speed by about 33 percent.
+Each group has a 32-bit Bloom filter. When a key overflows from its home
+group to a later group because the home group is full, the map sets one bit
+(chosen by the hash) in the home group's word. When `find` does not locate
+the key in the home group, a miss ends there if the home group has an empty
+slot or the key's bit is clear. Only otherwise does `find` probe the next
+groups. The idea comes from `boost::unordered_flat_map`, which keeps an
+8-bit filter inside each group.
+
+Why 32 bits: at the 0.875 load factor about 48 percent of the home groups
+are full. With an 8-bit filter, about 20 percent of the misses in a full
+group find their bit set by chance, so 9.5 percent of all misses probed a
+second group. Such a miss is expensive: its branch waits for a DRAM load,
+so a mispredict costs about one memory latency (measured on the i5-3230M:
+about 140 ns per probing miss, half of the total miss time). With 32 bits
+the share drops to 2.7 percent (64 bits: 1.4 percent). Measured on the
+i5-3230M, misses got 12 to 20 percent faster, hits did not change, and the
+cost is 0.19 bytes per slot (about 1 percent). A filter inside the control
+cache line (as in boost) was also tried: it saved no time, because the
+extra address arithmetic slowed down hits (see BENCHMARK.md, "Profiling
+on the i5-3230M").
+
+`find` reads the overflow word together with the control bytes, not only
+after they show a full group. The two loads then overlap, and the test
+"empty slot or clear bit" needs no hard-to-predict branch.
 
 `erase` does not clear overflow bits. This is conservative and correct.
 Rehash rebuilds the bits.
@@ -281,7 +303,7 @@ In short (`uint64_t -> uint64_t`, random keys, compared with emhash8,
 boost::unordered_flat_map, absl::flat_hash_map and the node-based maps):
 
 - **Memory**: sflat uses the least memory in steady state on every machine
-  (19.5 to 21.6 bytes/entry). On Linux at 50M to 100M entries it also has
+  (19.5 to 21.8 bytes/entry). On Linux at 50M to 100M entries it also has
   the lowest growth peak.
 - **Find hit (random order)**: on Linux x86-64, sflat is the fastest or
   within 20 percent of the fastest at every size. On the M2 (no THP)
@@ -292,7 +314,8 @@ boost::unordered_flat_map, absl::flat_hash_map and the node-based maps):
   fastest.
 - On the machines with small caches and TLBs (Celeron, i5) much of the lead
   of sflat comes from transparent huge pages, not from the probing scheme.
-- **Find miss**: boost_flat is faster on every machine.
+- **Find miss**: boost_flat is faster on every machine (on the i5-3230M,
+  with the current code, by 1.1 to 1.3 times).
 - **Iterate**: not a goal; emhash8 is much faster.
 
 ## Correctness tests
