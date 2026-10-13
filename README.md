@@ -220,6 +220,12 @@ The map processes the hash in three steps.
 2. It applies a boost-style mulx64 avalanche: `(x * C) ^ ((x * C) >> 64)`.
    This is one 128-bit multiplication. It spreads weak hashes well, for
    example the identity hash of sequential integers.
+   A plain 64-bit `x * C` is not sufficient. In a 64-bit product, bit k
+   depends only on bits [0, k] of the key, so H2 depends only on the low 8
+   bits of the key. Keys with regular low bits (aligned pointers, `i << 8`,
+   `i * 64`) then get one or a few H2 values, and find becomes up to 10
+   times slower. The xor of the high half prevents this.
+   `test_hash_bits_structured_keys` checks it.
 3. It uses the high 32 bits of the mixed hash for fastrange positioning.
    It uses the low 8 bits for H2. It uses bits [8, 13) for the overflow bit
    (bits [8, 8 + log2(SFLAT_OVERFLOW_BITS)) in general).

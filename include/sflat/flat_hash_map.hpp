@@ -152,14 +152,23 @@ struct EmptyCtrl {
 };
 inline constexpr EmptyCtrl kEmptyCtrl{};
 
-// Single 64-bit multiply mixer, C = 2^64/phi (golden ratio).
-// The low 8 bits (used for H2) are a permutation for odd C, and the high
-// 32 bits (used by Fastrange) get good avalanche from carry propagation,
-// so this is robust against weak hashes such as std::hash<uint64_t>
-// identity on sequential keys. Cheaper than a 128-bit multiply + xor-fold
-// (measured ~10-50% faster on insert/find).
+// Single-multiply avalanche mixer, boost-style mulx64:
+//   (x * C) ^ ((x * C) >> 64),  C = 2^64/phi (golden ratio).
+// One 128-bit multiply instead of a splitmix64 finalizer (which needs two
+// *dependent* 64-bit multiplies): much shorter critical path, while still
+// robust against weak hashes such as std::hash<uint64_t> identity on
+// sequential keys.
+//
+// Do not drop the high half (a plain 64-bit x * C). In a 64-bit product,
+// bit k depends only on bits [0, k] of x. Then H2 (bits [0,8)) depends only
+// on the low 8 bits of the key, and the overflow bit only on the low 13
+// bits. Keys with regular low bits (aligned pointers, i << 8, i * 64) then
+// share a few H2 values or one, and a find compares many keys: up to 10x
+// slower. The xor of the high half makes every output bit depend on every
+// key bit.
 inline uint64_t MixHash(uint64_t x) noexcept {
-  return x * 0x9E3779B97F4A7C15ULL;
+  const __uint128_t r = (__uint128_t)x * 0x9E3779B97F4A7C15ULL;
+  return (uint64_t)r ^ (uint64_t)(r >> 64);
 }
 
 // 32-bit Lemire fastrange: maps h uniformly into [0, n) with a single
