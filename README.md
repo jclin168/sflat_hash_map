@@ -10,6 +10,18 @@ incremental and gives old pages back to the kernel. This avoids a latency
 spike and keeps the growth memory peak low. The map suits large data sets
 where memory is important.
 
+## Why this project
+
+- `std::unordered_map` is too slow.
+- Other flat hash maps use too much memory. They grow 2x, so a large table
+  goes from 32 GB to 64 GB to 128 GB or more. This is not acceptable.
+- The usual use case is simple: you know the number of entries, you fill
+  the map, and then you do fast lookups. Iteration is almost never
+  necessary. Lookups of missing keys are rare.
+- Transparent huge pages (THP) can make lookups in large tables faster.
+
+These requirements are the reasons for this project.
+
 ## File structure
 
 ```
@@ -208,6 +220,12 @@ The map processes the hash in three steps.
 2. It applies a boost-style mulx64 avalanche: `(x * C) ^ ((x * C) >> 64)`.
    This is one 128-bit multiplication. It spreads weak hashes well, for
    example the identity hash of sequential integers.
+   A plain 64-bit `x * C` is not sufficient. In a 64-bit product, bit k
+   depends only on bits [0, k] of the key, so H2 depends only on the low 8
+   bits of the key. Keys with regular low bits (aligned pointers, `i << 8`,
+   `i * 64`) then get one or a few H2 values, and find becomes up to 10
+   times slower. The xor of the high half prevents this.
+   `test_hash_bits_structured_keys` checks it.
 3. It uses the high 32 bits of the mixed hash for fastrange positioning.
    It uses the low 8 bits for H2. It uses bits [8, 13) for the overflow bit
    (bits [8, 8 + log2(SFLAT_OVERFLOW_BITS)) in general).
@@ -305,17 +323,19 @@ boost::unordered_flat_map, absl::flat_hash_map and the node-based maps):
 - **Memory**: sflat uses the least memory in steady state on every machine
   (19.5 to 21.8 bytes/entry). On Linux at 50M to 100M entries it also has
   the lowest growth peak.
-- **Find hit (random order)**: on Linux x86-64, sflat is the fastest or
-  within 20 percent of the fastest at every size. On the M2 (no THP)
-  absl_flat and boost_flat are faster at 10M and 100M.
+- **Find hit (random order)**: on Linux x86-64, sflat is the fastest at
+  the largest size of each machine. On the Xeon VM, boost_flat is 3
+  percent faster at 10M. On the M2 (no THP) absl_flat
+  and boost_flat are faster at 10M and 100M.
 - **Insert**: on the Celeron and the i5, sflat is the fastest in most
-  rows. On the Xeon VM, boost_flat and absl_flat are faster at 1M and 10M
-  (huge page faults are slow in the VM). On the M2, boost_flat is the
-  fastest.
+  rows. On the Xeon VM, sflat is the fastest at 1M and 100M, and
+  boost_flat is 6 percent faster at 10M (reserved insert). On the M2,
+  boost_flat is the fastest.
 - On the machines with small caches and TLBs (Celeron, i5) much of the lead
   of sflat comes from transparent huge pages, not from the probing scheme.
-- **Find miss**: boost_flat is faster on every machine (on the i5-3230M,
-  with the current code, by 1.1 to 1.3 times).
+- **Find miss**: boost_flat is faster on every machine. With the current
+  code it is 1.1 to 1.3 times faster on the i5-3230M and 1.2 to 1.7 times
+  on the Xeon.
 - **Iterate**: not a goal; emhash8 is much faster.
 
 ## Correctness tests

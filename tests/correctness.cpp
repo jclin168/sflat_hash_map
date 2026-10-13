@@ -336,6 +336,56 @@ void test_sequential_keys() {
   std::printf("test_sequential_keys OK\n");
 }
 
+// Keys with regular low bits (aligned pointers, shifted IDs) must still
+// spread over all H2 values, all overflow bits and all groups. A mixer that
+// lets low output bits depend only on low key bits (a plain 64-bit
+// multiply) gives these keys one or a few H2 values, and a find then
+// compares many keys.
+void test_hash_bits_structured_keys() {
+  using sflat::detail::Fastrange;
+  using sflat::detail::H2;
+  using sflat::detail::MixHash;
+  struct Pattern {
+    const char* name;
+    uint64_t (*key)(uint64_t);
+  };
+  const Pattern patterns[] = {
+      {"i", [](uint64_t i) { return i; }},
+      {"i*1000", [](uint64_t i) { return i * 1000; }},
+      {"ptr i*16", [](uint64_t i) -> uint64_t { return 0x7f0000000000ull + i * 16; }},
+      {"ptr i*64", [](uint64_t i) -> uint64_t { return 0x7f0000000000ull + i * 64; }},
+      {"i<<8", [](uint64_t i) { return i << 8; }},
+      {"i<<32", [](uint64_t i) { return i << 32; }},
+      {"i<<48", [](uint64_t i) { return i << 48; }},
+  };
+  const uint64_t n = 4096;
+  const size_t ng = 1024;  // 4 keys per group on average
+  for (const Pattern& p : patterns) {
+    bool h2[256] = {};
+    bool ovf[64] = {};
+    std::vector<bool> grp(ng);
+    size_t n_h2 = 0, n_ovf = 0, n_grp = 0;
+    for (uint64_t i = 0; i < n; ++i) {
+      const uint64_t h = MixHash(std::hash<uint64_t>{}(p.key(i)));
+      const unsigned b = static_cast<unsigned>(H2(h));
+      if (!h2[b]) h2[b] = true, ++n_h2;
+      const unsigned o = static_cast<unsigned>((h >> 8) & (SFLAT_OVERFLOW_BITS - 1));
+      if (!ovf[o]) ovf[o] = true, ++n_ovf;
+      const size_t g = Fastrange(h, ng);
+      if (!grp[g]) grp[g] = true, ++n_grp;
+    }
+    // Random hashes give about 254 H2 values, all overflow bits, and about
+    // 1005 of 1024 groups.
+    if (n_h2 < 240 || n_ovf < SFLAT_OVERFLOW_BITS || n_grp < 900)
+      std::printf("  %s: %zu H2 values, %zu overflow bits, %zu groups\n",
+                  p.name, n_h2, n_ovf, n_grp);
+    CHECK(n_h2 >= 240);
+    CHECK(n_ovf == SFLAT_OVERFLOW_BITS);
+    CHECK(n_grp >= 900);
+  }
+  std::printf("test_hash_bits_structured_keys OK\n");
+}
+
 // Operations that run while an incremental migration is in progress.
 // Each case fills a map until a growth migration has just started, so most
 // elements are still in the old table.
@@ -538,6 +588,7 @@ int main() {
   test_string_keys();
   test_growth_factor();
   test_sequential_keys();
+  test_hash_bits_structured_keys();
   test_during_migration();
   test_large_mixed();
   test_custom_allocator();
