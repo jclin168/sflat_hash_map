@@ -48,10 +48,14 @@
 //   SFLAT_SIMD_SSE2  x86-64 baseline, 16 per group
 //   SFLAT_SIMD_NEON  ARM NEON (AArch64, Apple Silicon, ARMv7 + NEON), 16
 //   SFLAT_SIMD_SWAR  any other CPU: 8 per group in a uint64_t
+//   SFLAT_NO_AVX2=1  to use SSE2 groups on an AVX2 build
 #if !defined(SFLAT_NO_SIMD)
 #define SFLAT_NO_SIMD 0
 #endif
-#if !SFLAT_NO_SIMD && defined(__AVX2__)
+#if !defined(SFLAT_NO_AVX2)
+#define SFLAT_NO_AVX2 0
+#endif
+#if !SFLAT_NO_SIMD && !SFLAT_NO_AVX2 && defined(__AVX2__)
 #define SFLAT_SIMD_AVX2 1
 #elif !SFLAT_NO_SIMD &&                                   \
     (defined(__SSE2__) || defined(_M_X64) ||              \
@@ -77,12 +81,44 @@
 #define SFLAT_PREFETCH_SLOTS 0
 #endif
 #endif
+// SFLAT_LAZY_OVERFLOW=1: find() reads the home group's overflow word only
+// when no key in the group matched, not together with the control bytes. A
+// hit then needs two memory reads (control bytes and slot) instead of three;
+// at 100M entries the overflow array (25 MB) does not fit in the cache, so
+// the third read is often a DRAM miss. On Apple M2 this made random hits 8 to
+// 13 percent faster with no loss on misses. Not measured on x86-64, where
+// reading both at once made misses faster (BENCHMARK.md, i5-3230M), so it is
+// on for NEON only.
+#if !defined(SFLAT_LAZY_OVERFLOW)
+#if defined(SFLAT_SIMD_NEON)
+#define SFLAT_LAZY_OVERFLOW 1
+#else
+#define SFLAT_LAZY_OVERFLOW 0
+#endif
+#endif
+// SFLAT_FIND_NEXT_INLINE=1: when the home group's overflow bit is set,
+// find() also probes the next group inline, before it calls the out-of-line
+// find_ptr_slow(). Most spilled keys sit in the next group.
+#if !defined(SFLAT_FIND_NEXT_INLINE)
+#define SFLAT_FIND_NEXT_INLINE 1
+#endif
 #if defined(SFLAT_SIMD_NEON) && (defined(__GNUC__) || defined(__clang__))
 #define SFLAT_FIND_INLINE __attribute__((always_inline))
 #else
 #define SFLAT_FIND_INLINE
 #endif
 
+// insert_with() is forced inline and its rare paths are kept out of line, so
+// an insert loop holds only the fast path (home group has an empty slot).
+#if defined(__GNUC__) || defined(__clang__)
+#define SFLAT_INSERT_INLINE __attribute__((always_inline))
+#define SFLAT_NOINLINE __attribute__((noinline))
+#define SFLAT_LIKELY(x) __builtin_expect(!!(x), 1)
+#else
+#define SFLAT_INSERT_INLINE
+#define SFLAT_NOINLINE
+#define SFLAT_LIKELY(x) (x)
+#endif
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
@@ -258,6 +294,13 @@ struct Group {
     return static_cast<Mask>(_mm256_movemask_epi8(
         _mm256_cmpeq_epi8(v, _mm256_set1_epi8(static_cast<char>(c)))));
   }
+  // Match(H2(h)) with the clamp done in the vector unit (one VPMINUB)
+  // instead of a scalar compare, cmov and constant).
+  Mask MatchH2(uint64_t h) const noexcept {
+    const __m256i c = _mm256_min_epu8(_mm256_set1_epi8(static_cast<char>(h)),
+                                      _mm256_set1_epi8(static_cast<char>(0xFD)));
+    return static_cast<Mask>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, c)));
+  }
   static unsigned Lane(Mask m) noexcept { return Ctz(m); }
 };
 #elif defined(SFLAT_SIMD_SSE2)
@@ -276,6 +319,11 @@ struct Group {
   Mask Match(uint8_t c) const noexcept {
     return static_cast<Mask>(_mm_movemask_epi8(
         _mm_cmpeq_epi8(v, _mm_set1_epi8(static_cast<char>(c)))));
+  }
+  Mask MatchH2(uint64_t h) const noexcept {
+    const __m128i c = _mm_min_epu8(_mm_set1_epi8(static_cast<char>(h)),
+                                   _mm_set1_epi8(static_cast<char>(0xFD)));
+    return static_cast<Mask>(_mm_movemask_epi8(_mm_cmpeq_epi8(v, c)));
   }
   static unsigned Lane(Mask m) noexcept { return Ctz(m); }
 };
@@ -301,6 +349,8 @@ struct Group {
     const uint8x8_t nib = vshrn_n_u16(vreinterpretq_u16_u8(eq), 4);
     return vget_lane_u64(vreinterpret_u64_u8(nib), 0) & kAll;
   }
+  // Scalar clamp: a vector umin measured no faster on Apple M2.
+  Mask MatchH2(uint64_t h) const noexcept { return Match(H2(h)); }
   static unsigned Lane(Mask m) noexcept {
     const unsigned c = Ctz(m);
 #if defined(__clang__)
@@ -333,9 +383,21 @@ struct Group {
     const uint64_t x = v ^ (0x0101010101010101ULL * c);
     return ~(((x & kLo7) + kLo7) | x | kLo7);
   }
+  Mask MatchH2(uint64_t h) const noexcept { return Match(H2(h)); }
   static unsigned Lane(Mask m) noexcept { return Ctz(m) >> kShift; }
 };
 #endif
+
+// First slot of the key's home group: Fastrange(h, cap / kWidth) * kWidth,
+// computed as one high multiply and a mask instead of a shift, a multiply
+// and a shift. Both give the same group (floor(floor(x * kWidth) / kWidth) ==
+// floor(x)), which matters: find_or_prepare(), migrate_one() and find_empty()
+// still use Fastrange().
+inline size_t HomeSlot(uint64_t h, size_t cap) noexcept {
+  const __uint128_t p =
+      static_cast<__uint128_t>(h & 0xFFFFFFFF00000000ULL) * cap;
+  return static_cast<size_t>(p >> 64) & ~(Group::kWidth - 1);
+}
 
 // ---------------------------------------------------------------- page memory
 // With std::allocator the map manages its own memory:
@@ -1034,14 +1096,17 @@ class flat_hash_map {
   // Element with key, or nullptr. Never modifies the map.
   //
   // The inlined part handles the common cases: a hit in the home group, and
-  // a miss that the home group proves (an empty slot or a clear overflow
-  // bit), with no migration. Everything else goes to find_ptr_slow(). A
+  // a miss that the home group proves (a clear overflow bit), with
+  // no migration. An empty slot in the home group would prove a miss too,
+  // but testing it costs instructions on every miss; a set overflow bit is
+  // rare enough that the next-group probe below is cheaper. Everything else goes to find_ptr_slow(). A
   // small inlined part keeps callers' loops short: on Apple M2 a DRAM-bound
   // find loop gets about 0.4 ns slower per extra instruction, since fewer
   // finds then fit in the out-of-order window.
   SFLAT_FIND_INLINE value_type* find_ptr(const key_type& key,
                                          uint64_t h) const noexcept {
-    const size_t home = detail::Fastrange(h, cap_ / kWidth);
+    const size_t base = detail::HomeSlot(h, cap_);  // home group * kWidth
+    const size_t home = base / kWidth;
 #if SFLAT_PREFETCH_SLOTS
     {
       // Up to 256 bytes of the group (two 128-byte lines on Apple Silicon).
@@ -1049,27 +1114,49 @@ class flat_hash_map {
       constexpr size_t kBytes = kWidth * sizeof(slot_type) < 256
                                     ? kWidth * sizeof(slot_type)
                                     : 256;
-      const uintptr_t p = reinterpret_cast<uintptr_t>(slots_) +
-                          home * kWidth * sizeof(slot_type);
+      const uintptr_t p =
+           reinterpret_cast<uintptr_t>(slots_) + base * sizeof(slot_type);
       for (size_t o = 0; o < kBytes; o += 128)
         __builtin_prefetch(reinterpret_cast<const void*>(p + o));
     }
 #endif
-    const Group g = Group::Load(ctrl_ + home * kWidth);
+    const Group g = Group::Load(ctrl_ + base);
+#if !SFLAT_LAZY_OVERFLOW
     // Read the overflow word now, not only after the control bytes say the
-    // group is full (about half of the groups at max load): the two loads
+    // group is full (about a third of the groups at max load): the two loads
     // then overlap, and the miss test below has no hard-to-predict branch.
     const detail::Overflow ovf = overflow_[home] & detail::OverflowBit(h);
-    Mask m = g.Match(detail::H2(h));
+#endif
+    Mask m = g.MatchH2(h);
     while (m) {
       const value_type* e = reinterpret_cast<const value_type*>(
-          &slots_[home * kWidth + Group::Lane(m)]);
+          &slots_[base + Group::Lane(m)]);
       if (equal_(e->first, key)) return const_cast<value_type*>(e);
       m &= m - 1;
     }
-    if (__builtin_expect(old_cap_ == 0, 1) &&
-        ((g.Match(detail::kEmpty) != 0) | (ovf == 0)))
-      return nullptr;
+    if (SFLAT_LIKELY(old_cap_ == 0)) {
+#if SFLAT_LAZY_OVERFLOW
+      const detail::Overflow ovf = overflow_[home] & detail::OverflowBit(h);
+#endif
+      if (ovf == 0) return nullptr;
+#if SFLAT_FIND_NEXT_INLINE
+      // Keys that spill from the home group take the first group after it
+      // with an empty slot. A slot never becomes empty again (erase leaves a
+      // tombstone) until a rehash or migration rebuilds the table, so an
+      // empty slot in the next group proves that the key is not further on.
+      size_t nb = base + kWidth;
+      if (nb == cap_) nb = 0;
+      const Group g2 = Group::Load(ctrl_ + nb);
+      Mask m2 = g2.MatchH2(h);
+      while (m2) {
+        const value_type* e = reinterpret_cast<const value_type*>(
+            &slots_[nb + Group::Lane(m2)]);
+        if (equal_(e->first, key)) return const_cast<value_type*>(e);
+        m2 &= m2 - 1;
+      }
+      if (g2.Match(detail::kEmpty)) return nullptr;
+#endif
+    }
     return find_ptr_slow(key, h);
   }
 
@@ -1184,34 +1271,79 @@ class flat_hash_map {
 
   // Common insert path. construct(void* where) builds the value.
   template <typename Construct>
-  std::pair<iterator, bool> insert_with(const key_type& key,
-                                        Construct&& construct) {
+  SFLAT_INSERT_INLINE inline std::pair<iterator, bool> insert_with(
+      const key_type& key, Construct&& construct) {
     const uint64_t h = hash_mixed(key);
-    if (__builtin_expect(growth_left_ != 0, 1)) {
+    if (SFLAT_LIKELY(growth_left_ != 0)) {
       // Fast path: no growth, no migration. Most keys are absent and their
       // home group has an empty slot. (An empty slot in the home group also
       // proves that the key is absent; tombstones do not matter here.)
-      const uint8_t hh = detail::H2(h);
-      const size_t home = detail::Fastrange(h, cap_ / kWidth);
-      const Group g = Group::Load(ctrl_ + home * kWidth);
-      Mask m = g.Match(hh);
+      const size_t base = detail::HomeSlot(h, cap_);  // home group * kWidth
+      const Group g = Group::Load(ctrl_ + base);
+      Mask m = g.MatchH2(h);
       while (m) {
-        value_type* e = cur_slot(home * kWidth + Group::Lane(m));
+        value_type* e = cur_slot(base + Group::Lane(m));
         if (equal_(e->first, key)) return {iterator(this, e), false};
         m &= m - 1;
       }
       const Mask me = g.Match(detail::kEmpty);
       if (me) {
-        const size_t idx = home * kWidth + Group::Lane(me);
+        const size_t idx = base + Group::Lane(me);
         value_type* e = cur_slot(idx);
         construct(static_cast<void*>(e));
-        ctrl_[idx] = hh;
+        ctrl_[idx] = detail::H2(h);
         ++size_;
         --growth_left_;
         return {iterator(this, e), true};
       }
+    }
+    return insert_with_slow(key, h, construct);
+  }
+
+  // The rest of insert_with(): the key's home group is full (and the key is
+  // not in it), or the table must grow or is migrating.
+  template <typename Construct>
+  SFLAT_NOINLINE std::pair<iterator, bool> insert_with_slow(
+      const key_type& key, uint64_t h, Construct&& construct) {
+    if (growth_left_ != 0) {
+      if (deleted_ == 0) {
+        // No tombstones, so the key goes to the first empty slot after the
+        // home group. (With tombstones, find_or_prepare() below reuses the
+        // first one.) growth_left_ != 0 means there is no migration and at
+        // least one empty slot, so the loop ends. If the home group's
+        // overflow bit is clear, no key with this bit spilled from it, so
+        // the later groups cannot hold the key and only empty slots matter.
+        const size_t home = detail::HomeSlot(h, cap_) / kWidth;
+        const size_t ng = cap_ / kWidth;
+        const detail::Overflow bit = detail::OverflowBit(h);
+        const bool may_spill = (overflow_[home] & bit) != 0;
+        size_t gi = home;
+        for (;;) {
+          if (++gi == ng) gi = 0;
+          const Group g = Group::Load(ctrl_ + gi * kWidth);
+          if (may_spill) {
+            Mask m = g.MatchH2(h);
+            while(m) {
+              value_type* e = cur_slot(gi * kWidth + Group::Lane(m));
+              if (equal_(e->first, key)) return {iterator(this, e), false};
+              m &= m - 1;
+            }
+          }
+          const Mask me = g.Match(detail::kEmpty);
+          if (me) {
+            const size_t idx = gi * kWidth + Group::Lane(me);
+            value_type* e = cur_slot(idx);
+            construct(static_cast<void*>(e));
+            ctrl_[idx] = detail::H2(h);
+            overflow_[home] |= bit;
+            ++size_;
+            --growth_left_;
+            return {iterator(this, e), true};
+          }
+        }
+      }
     } else {
-      prepare_insert_slow();
+      return insert_with_growth(key, h, construct);
     }
     const Probe p = locate_for_insert(key, h);
     if (!p.found) {
@@ -1220,6 +1352,32 @@ class flat_hash_map {
       reset_growth_left();
     }
     return {iterator(this, slot_at(p.idx)), !p.found};
+  }
+
+  // Insert that first grows, migrates or rehashes the table. That moves
+  // elements and may free the old table, while key and the arguments captured
+  // by construct may refer to an element (m[it->first], m.insert(*it),
+  // m.try_emplace(k, m.at(k2))). So use them before the table changes: look
+  // the key up, then build the value in a temporary, then prepare the table.
+  // Costs one more lookup and move, only on this path. As a bonus the table is
+  // untouched if construction throws.
+  template <typename Construct>
+  SFLAT_NOINLINE std::pair<iterator, bool> insert_with_growth(
+      const key_type& key, uint64_t h, Construct& construct) {
+    if (value_type* e = find_ptr(key, h)) return {iterator(this, e), false};
+    alignas(value_type) unsigned char buf[sizeof(value_type)];
+    construct(static_cast<void*>(buf));
+    struct Temp {
+      value_type* v;
+      ~Temp() { v->~value_type(); }
+    } tmp{std::launder(reinterpret_cast<value_type*>(buf))};
+    prepare_insert_slow();
+    const Probe p = locate_for_insert(tmp.v->first, h);
+    assert(!p.found);
+    ::new (static_cast<void*>(slot_at(p.idx))) value_type(std::move(*tmp.v));
+    commit_insert(p.idx, h);
+    reset_growth_left();
+    return {iterator(this, slot_at(p.idx)), true};
   }
 
   // First empty slot for a hash (table is all-empty on entry paths that use
@@ -1549,6 +1707,15 @@ class flat_hash_map {
       free_bytes(ctrl_, cap_);
       free_overflow(overflow_, cap_ / kWidth);
     }
+    // Leave a valid empty table: no pointer to the freed arrays survives,
+    // and growth_left_ == 0 sends the next insert to the slow path.
+    slots_ = nullptr;
+    ctrl_ = empty_ctrl();
+    overflow_ = empty_overflow();
+    cap_ = 0;
+    deleted_ = 0;
+    limit_ = 0;
+    growth_left_ = 0;
     free_old();
   }
 
@@ -1619,6 +1786,20 @@ class flat_hash_map {
 
   void insert(std::initializer_list<value_type> il) {
     insert(il.begin(), il.end());
+  }
+
+  // emplace(key, mapped) with an exact key_type: builds the value in place
+  // instead of in a temporary that is then moved (the generic emplace below).
+  // An argument that aliases an element is still safe: the table changes only
+  // in insert_with_growth(), after the value is built.
+  template <typename K, typename M,
+            typename std::enable_if<
+                std::is_same<typename std::decay<K>::type, key_type>::value,
+                int>::type = 0>
+  std::pair<iterator, bool> emplace(K&& k, M&& m) {
+    return insert_with(k, [&](void* p) {
+      ::new (p) value_type(std::forward<K>(k), std::forward<M>(m));
+    });
   }
 
   template <typename... Args>
@@ -1708,10 +1889,22 @@ class flat_hash_map {
     return iterator(this, const_cast<value_type*>(first.p_));
   }
 
+  // Same as erase(find(key)), but without the scan for the next full slot
+  // that erase(const_iterator) does to build its return value. That scan
+  // reads memory the caller never uses: on Apple M2 erase by key got 17
+  // percent faster at 10M entries and 18 percent at 100M.
   size_type erase(const key_type& key) {
-    const iterator it = find(key);
-    if (it == end()) return 0;
-    erase(it);
+    value_type* const e = find_ptr(key, hash_mixed(key));
+    if (!e) return 0;
+    const size_t i = index_of(e);
+    destroy_slot(i);
+    if (i < cap_) {
+      ctrl_[i] = detail::kDeleted;
+      ++deleted_;
+    } else {
+      old_ctrl_[i - cap_] = detail::kDeleted;  // the migration skips it
+    }
+    --size_;
     return 1;
   }
 
