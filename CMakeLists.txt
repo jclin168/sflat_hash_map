@@ -54,6 +54,14 @@ if(SFLAT_BUILD_BENCH)
       target_link_libraries(bench PRIVATE absl::flat_hash_map
                                           absl::node_hash_map)
     endif()
+    # Optional Google sparsehash (header only): thirdparty/sparsehash/include
+    # or the system.
+    find_path(SFLAT_SPARSEHASH_DIR sparsehash/dense_hash_map
+      PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/sparsehash/include)
+    if(SFLAT_SPARSEHASH_DIR)
+      target_compile_definitions(bench PRIVATE HAS_SPARSEHASH)
+      target_include_directories(bench PRIVATE ${SFLAT_SPARSEHASH_DIR})
+    endif()
   else()
     message(STATUS "emhash or boost not found, skipping bench target")
   endif()

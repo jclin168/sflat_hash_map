@@ -581,6 +581,46 @@ void test_custom_allocator() {
   std::printf("test_custom_allocator OK\n");
 }
 
+// Arguments may refer to elements of the map itself, as with
+// std::unordered_map. An insert that grows or migrates the table moves the
+// elements (and may free the old table), so it must read the key and value
+// arguments first. Sizes cover inserts at the growth point and during
+// migration; strings are longer than the SSO buffer so ASan sees reads of
+// freed or moved-from memory.
+void test_self_aliasing() {
+  using Map = sflat::flat_hash_map<std::string, std::string>;
+  auto key = [](int i) { return "key_long_enough_to_skip_sso_" + std::to_string(i); };
+  auto val = [](int i) { return "val_long_enough_to_skip_sso_" + std::to_string(i); };
+  for (int n = 1; n < 600; ++n) {
+    for (int op = 0; op < 3; ++op) {
+      // The value aliases an element.
+      Map m;
+      for (int i = 0; i < n; ++i) m.emplace(key(i), val(i));
+      for (int e = 0; e < 40; ++e) {
+        const int src = e % n;
+        const std::string& v = m.at(key(src));
+        if (op == 0) m.try_emplace(key(n + e), v);
+        else if (op == 1) m.insert_or_assign(key(n + e), v);
+        else m.emplace(key(n + e), v);
+        CHECK(m.at(key(n + e)) == val(src));
+      }
+      // The key aliases an element: no insert may happen.
+      Map k;
+      for (int i = 0; i < n; ++i) {
+        k.emplace(key(i), val(i));
+        const auto& kv = *k.find(key(i / 2));
+        const size_t before = k.size();
+        if (op == 0) k[kv.first];
+        else if (op == 1) k.insert(kv);
+        else k.try_emplace(kv.first, "x");
+        CHECK(k.size() == before);
+      }
+      for (int i = 0; i < n; ++i) CHECK(k.at(key(i)) == val(i));
+    }
+  }
+  std::printf("test_self_aliasing OK\n");
+}
+
 int main() {
   test_group_match();
   test_api_surface();
@@ -590,6 +630,7 @@ int main() {
   test_sequential_keys();
   test_hash_bits_structured_keys();
   test_during_migration();
+  test_self_aliasing();
   test_large_mixed();
   test_custom_allocator();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
