@@ -2,7 +2,9 @@
 // Copyright 2026 Jian-Cheng Lin
 // Benchmark: sflat::flat_hash_map vs emhash8::HashMap vs
 // boost::unordered_flat_map vs boost::unordered_map vs std::unordered_map,
-// and with -DHAS_ABSL also absl::flat_hash_map and absl::node_hash_map.
+// and with -DHAS_ABSL also absl::flat_hash_map and absl::node_hash_map,
+// and with -DHAS_SPARSEHASH also google::dense_hash_map and
+// google::sparse_hash_map.
 //
 // Each scenario runs in a forked child so the parent can read the child's
 // peak RSS (ru_maxrss) via wait4() for an honest per-map memory number.
@@ -21,6 +23,11 @@
 #include <boost/unordered/unordered_map.hpp>
 
 #include <unordered_map>
+
+#ifdef HAS_SPARSEHASH
+#include <sparsehash/dense_hash_map>
+#include <sparsehash/sparse_hash_map>
+#endif
 
 #ifdef HAS_ABSL
 #include <absl/container/flat_hash_map.h>
@@ -81,6 +88,44 @@ struct Ops<emhash8::HashMap<uint64_t, uint64_t>> {
   }
   static size_t do_erase(Map& m, uint64_t k) { return m.erase(k); }
 };
+
+#ifdef HAS_SPARSEHASH
+// The Google maps reserve two keys as markers: dense_hash_map an empty and a
+// deleted key, sparse_hash_map a deleted key (needed for erase). The random
+// keys never take these values in practice. Both use their default hash
+// (std::hash, the identity in libc++ and libstdc++); the keys are random, so
+// this does not hurt them here.
+constexpr uint64_t kSparseEmptyKey = ~0ULL;
+constexpr uint64_t kSparseDeletedKey = ~0ULL - 1;
+
+struct DenseHashMap : google::dense_hash_map<uint64_t, uint64_t> {
+  DenseHashMap() {
+    set_empty_key(kSparseEmptyKey);
+    set_deleted_key(kSparseDeletedKey);
+  }
+};
+
+struct SparseHashMap : google::sparse_hash_map<uint64_t, uint64_t> {
+  SparseHashMap() { set_deleted_key(kSparseDeletedKey); }
+};
+
+// No reserve() or emplace() in sparsehash 2.0: resize() and insert() instead.
+template <typename Map>
+struct SparseOps {
+  static void do_reserve(Map& m, size_t n) { m.resize(n); }
+  static void do_emplace(Map& m, uint64_t k, uint64_t v) {
+    m.insert(typename Map::value_type(k, v));
+  }
+  static typename Map::iterator do_find(Map& m, uint64_t k) {
+    return m.find(k);
+  }
+  static size_t do_erase(Map& m, uint64_t k) { return m.erase(k); }
+};
+template <>
+struct Ops<DenseHashMap> : SparseOps<DenseHashMap> {};
+template <>
+struct Ops<SparseHashMap> : SparseOps<SparseHashMap> {};
+#endif
 
 // shuffled: the keys in a random order (part of the baseline memory).
 void gen_arrays(size_t n, std::vector<uint64_t>& keys,
@@ -264,6 +309,10 @@ const Entry kMaps[] = {
 #ifdef HAS_ABSL
     SFLAT_BENCH_MAP("absl_flat", absl::flat_hash_map<uint64_t, uint64_t>),
     SFLAT_BENCH_MAP("absl_node", absl::node_hash_map<uint64_t, uint64_t>),
+#endif
+#ifdef HAS_SPARSEHASH
+    SFLAT_BENCH_MAP("dense_hash", DenseHashMap),
+    SFLAT_BENCH_MAP("sparse_hash", SparseHashMap),
 #endif
     SFLAT_BENCH_MAP("std", std::unordered_map<uint64_t, uint64_t>),
 };
