@@ -14,10 +14,12 @@ The benchmark has been run on four machines:
 
 All use the same program (`bench/bench.cpp`). The Xeon, the Celeron and the
 i5 use the same versions of the comparison maps; the M2 uses the versions
-listed in its section. The Xeon and i5 results are from the current code
-(32-bit overflow words, group-wise iteration); the Celeron and M2 were
-measured before these changes, so their sflat miss and iterate rows are
-slower than the current code would give.
+listed in its section. The Xeon results are the newest (commit caae2bc,
+with the find and insert speedups of PR #11 and #12), and only the Xeon
+also has the Google dense_hash_map and sparse_hash_map. The i5 results are
+from the 32-bit overflow code before PR #11; the Celeron and M2 were
+measured before that, so their sflat miss and iterate rows are slower than
+the current code would give.
 
 ## Summary across machines
 
@@ -27,23 +29,27 @@ huge pages (THP); macOS has no such path.
 
 | Row | Xeon, 100M | Celeron, 50M | i5-3230M, 100M | M2, 100M |
 |---|---|---|---|---|
-| insert (reserved) | **83.6** / 90.3 absl_flat | **181.1** / 234.3 emhash8 | **82.4** / 115.0 emhash8 | 32.1 / **23.5** boost_flat |
-| find hit (random order) | **45.8** / 46.7 boost_flat | **71.6** / 194.4 absl_flat | **36.4** / 74.5 boost_flat | 18.0 / **13.2** absl_flat |
-| find miss | 34.7 / **28.6** boost_flat | 60.4 / **57.9** boost_flat | 27.2 / **24.9** boost_flat | 24.3 / **10.6** boost_flat |
-| insert (no reserve) | **142.8** / 168.3 boost_flat | **207.9** / 258.1 absl_flat | **92.8** / 175.7 boost_flat | 40.2 / **29.7** boost_flat |
-| bytes/entry (steady) | **19.6** / 21.5 boost_flat | **19.6** / 21.5 boost_flat | **19.7** / 21.5 boost_flat | **19.5** / 21.5 boost_flat |
+| insert (reserved) | **42.7** / 75.4 absl_flat | **181.1** / 234.3 emhash8 | **82.4** / 115.0 emhash8 | 32.1 / **23.5** boost_flat |
+| find hit (random order) | 41.3 / **35.0** dense_hash | **71.6** / 194.4 absl_flat | **36.4** / 74.5 boost_flat | 18.0 / **13.2** absl_flat |
+| find miss | **25.0** / 26.0 absl_flat | 60.4 / **57.9** boost_flat | 27.2 / **24.9** boost_flat | 24.3 / **10.6** boost_flat |
+| insert (no reserve) | **90.6** / 142.5 boost_flat | **207.9** / 258.1 absl_flat | **92.8** / 175.7 boost_flat | 40.2 / **29.7** boost_flat |
+| bytes/entry (steady) | 19.6 / **17.8** sparse_hash | **19.6** / 21.5 boost_flat | **19.7** / 21.5 boost_flat | **19.5** / 21.5 boost_flat |
 
-- sflat uses the least memory in steady state on every machine.
+- sflat uses the least memory in steady state on every machine, except
+  Google sparse_hash_map on the Xeon: it uses about 9 percent less, but its
+  find hit is 4 to 6 times slower.
 - On the x86-64 machines with small caches and TLBs (Celeron, i5) sflat
   leads in insert and find hit. Most of that lead comes from huge pages: with
   `-DSFLAT_USE_THP=0` it is close to boost_flat and absl_flat (see the THP
   tables in each section).
-- At 100M, sflat leads on the Xeon too: insert, find hit and no-reserve
-  insert. The THP-off table in the Xeon section shows how much of this
-  comes from huge pages.
-- boost_flat is the fastest on find miss everywhere. With the 32-bit
-  overflow words the gap is 1.1 to 1.3 times on the i5 (was up to 2.1) and
-  1.2 to 1.7 times on the Xeon (was 1.4 to 3.3).
+- At 100M on the Xeon, sflat is the fastest on insert, no-reserve insert
+  and find miss. On find hit, Google dense_hash_map is 15 percent faster
+  (it keeps the table at most half full, at 2.2 times the memory of sflat);
+  sflat is the fastest of the others. The THP-off table in the Xeon section
+  shows how much of this comes from huge pages.
+- boost_flat is the fastest on find miss on the other machines. With the
+  32-bit overflow words the gap on the i5 is 1.1 to 1.3 times (was up to
+  2.1).
 - On the M2 (no THP) boost_flat and absl_flat are faster at 10M and 100M,
   except in memory.
 
@@ -60,11 +66,15 @@ cmake -S abseil-cpp -B abseil-build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_STANDARD=17 -DABSL_PROPAGATE_CXX_STD=ON \
   -DCMAKE_INSTALL_PREFIX=$PWD/abseil
 cmake --build abseil-build -j && cmake --install abseil-build
+# Google sparsehash (optional, header only): install to thirdparty/sparsehash
+git clone https://github.com/sparsehash/sparsehash sparsehash-src
+git -C sparsehash-src checkout sparsehash-2.0.4
+(cd sparsehash-src && ./configure --prefix=$PWD/../sparsehash && make install-data)
 cd ..
 ```
 
-Build and run (CMake adds `-O3 -march=native -DNDEBUG`, and `-DHAS_ABSL`
-when it finds Abseil):
+Build and run (CMake adds `-O3 -march=native -DNDEBUG`, `-DHAS_ABSL` when
+it finds Abseil, and `-DHAS_SPARSEHASH` when it finds sparsehash):
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -97,24 +107,28 @@ use `taskset -c <cpu> ./build/bench ...` (the child processes inherit it).
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
   absl::flat_hash_map and absl::node_hash_map (Abseil LTS 20260817.0),
-  std::unordered_map (libstdc++ 13). They use glibc malloc without THP.
+  google::dense_hash_map and google::sparse_hash_map (sparsehash 2.0.4,
+  default max load 0.5 and 0.8, `std::hash`), std::unordered_map
+  (libstdc++ 13). They use glibc malloc without THP.
 - All maps are compiled with `-DNDEBUG`, so no debug asserts run.
-- Code: commit b0f6166 (32-bit overflow words, group-wise iteration,
-  128-bit MixHash).
+- Code: commit caae2bc (32-bit overflow words, group-wise iteration,
+  128-bit MixHash, the find and insert speedups of PR #11 and #12).
 - Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
   child process. Memory is the child peak RSS minus the baseline (the input
   arrays only).
 - Before each size, a warm-up child touches and frees memory. In a VM the
   host backs guest memory on first use, which is very slow. Without the
-  warm-up, the first map in the run order pays this cost.
-- 1M and 10M: median of 3 runs. 100M: 1 run.
+  warm-up, the first map in the run order pays this cost. Before the whole
+  run, a separate program touched 12 GiB twice.
+- 1M, 10M and 100M: median of 3 runs.
 
 ### Results
 
 Lower ns/op is better. Lower bytes/entry is better. **Bold** is the best
 value in the row.
 
-- "insert (reserved)" includes the `reserve(n)` call.
+- "insert (reserved)" includes the `reserve(n)` call. The Google maps have
+  no `reserve()`; the benchmark calls `resize(n)`.
 - "find hit (insert order)" asks for the keys in insertion order. This
   favors emhash8, which stores the elements densely in insertion order: its
   element reads become sequential. "find hit (random order)" is the fair
@@ -123,62 +137,61 @@ value in the row.
 - sflat grows 2x below 2 GiB, so all three sizes here use the 2x tier.
 
 The speed of this VM changes from run to run. During this run a first
-touch of new memory took 2 to 15 microseconds per 4 KiB page (bare metal:
-about 0.25). In an earlier run on the same day all maps were 10 to 30
-percent faster at 1M and 10M (for example boost_flat find hit at 1M: 9.5
-ns, here 13.7). Compare the maps in the same table, not with other runs.
+touch of new memory took 1.7 to 1.8 microseconds per 4 KiB page, once 12
+(bare metal: about 0.25). This is lower than in earlier runs, and the
+three runs agree better. Compare the maps in the same table, not with
+other runs.
 
 **n = 1,000,000**
 
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | **32.4** | 45.6 | 43.9 | 137.0 | 49.2 | 96.7 | 169.2 |
-| find hit (insert order) | 14.0 | **12.2** | 16.9 | 27.0 | 21.1 | 22.5 | 39.3 |
-| find hit (random order) | **12.4** | 17.5 | 13.7 | 36.1 | 20.1 | 30.8 | 41.3 |
-| find miss | 8.8 | 14.8 | **6.2** | 32.2 | 8.9 | 12.5 | 46.6 |
-| erase | 19.3 | 31.3 | **18.6** | 75.7 | 40.7 | 74.8 | 111.8 |
-| iterate | 9.2 | **0.9** | 13.0 | 24.0 | 10.4 | 18.2 | 48.6 |
-| insert (no reserve) | **67.2** | 118.0 | 88.5 | 247.1 | 81.6 | 165.6 | 278.6 |
-| bytes/entry (steady) | **21.4** | 33.9 | 34.7 | 46.5 | 36.8 | 52.0 | 41.7 |
-| bytes/entry (growth peak) | 40.5 | **36.0** | 51.1 | 46.6 | 54.2 | 58.2 | 45.1 |
-
-The sflat no-reserve insert at 1M was 214.3 ns in the first of the three
-runs and 64.9 to 67.2 ns in the other two (huge page faults; see "THP on
-and off" below). Reserved insert was stable: 30.4 to 35.2 ns.
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | dense_hash | sparse_hash | std |
+|---|---|---|---|---|---|---|---|---|---|
+| insert (reserved) | **18.1** | 34.6 | 29.5 | 104.3 | 37.3 | 68.6 | 38.2 | 149.3 | 125.9 |
+| find hit (insert order) | **8.9** | 9.0 | 11.3 | 19.2 | 12.4 | 15.6 | 16.8 | 49.6 | 27.2 |
+| find hit (random order) | 11.7 | 12.4 | **10.4** | 20.2 | 12.2 | 23.9 | 14.5 | 49.9 | 30.7 |
+| find miss | 8.1 | 12.5 | **6.1** | 20.7 | 6.8 | 8.3 | 25.8 | 36.5 | 37.1 |
+| erase | 13.9 | 21.7 | **11.1** | 42.6 | 19.0 | 39.3 | 16.5 | 66.1 | 70.8 |
+| iterate | 8.1 | **0.5** | 11.1 | 13.8 | 6.8 | 9.1 | 27.1 | 16.7 | 22.8 |
+| insert (no reserve) | **51.2** | 87.9 | 56.8 | 148.7 | 61.9 | 95.8 | 65.5 | 276.5 | 177.2 |
+| bytes/entry (steady) | 21.5 | 33.9 | 34.7 | 46.6 | 36.8 | 52.2 | 34.7 | **19.6** | 41.8 |
+| bytes/entry (growth peak) | 40.5 | 36.2 | 51.2 | 46.7 | 54.4 | 58.4 | 51.2 | **20.0** | 45.1 |
 
 At 1M the no-reserve table lands just after a 2x step (2.1M slots, load
 0.48). This is the reason for the 40.5 bytes/entry growth peak. It is the
-cost of 2x growth for small tables.
+cost of 2x growth for small tables. One of the three sflat no-reserve runs
+at 1M was 121.5 ns (huge page faults); the other two were 50.7 and 51.2.
 
 **n = 10,000,000**
 
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | 55.8 | 87.2 | **52.7** | 343.2 | 68.5 | 230.5 | 289.9 |
-| find hit (insert order) | 30.2 | **24.7** | 31.1 | 44.4 | 34.7 | 35.3 | 59.9 |
-| find hit (random order) | 33.7 | 37.1 | **32.6** | 64.8 | 35.7 | 59.6 | 79.0 |
-| find miss | 24.6 | 25.2 | **14.1** | 57.2 | 17.0 | 23.4 | 88.8 |
-| erase | 65.2 | 64.2 | **40.4** | 125.8 | 60.7 | 142.1 | 241.1 |
-| iterate | 10.7 | **1.2** | 13.8 | 34.3 | 9.4 | 20.1 | 87.5 |
-| insert (no reserve) | **83.1** | 208.6 | 186.9 | 394.2 | 223.1 | 250.2 | 563.3 |
-| bytes/entry (steady) | **20.0** | 29.5 | 27.0 | 42.8 | 28.6 | 47.2 | 40.4 |
-| bytes/entry (growth peak) | 30.1 | **29.6** | 40.3 | 42.8 | 42.9 | 47.2 | 41.8 |
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | dense_hash | sparse_hash | std |
+|---|---|---|---|---|---|---|---|---|---|
+| insert (reserved) | 50.8 | 52.9 | **49.5** | 190.1 | 51.4 | 116.5 | 144.3 | 341.2 | 253.0 |
+| find hit (insert order) | 22.0 | **18.2** | 27.1 | 42.1 | 28.6 | 30.2 | 29.6 | 140.4 | 51.6 |
+| find hit (random order) | **25.1** | 33.3 | 27.3 | 53.9 | 27.8 | 47.0 | 30.8 | 138.1 | 67.3 |
+| find miss | 15.3 | 21.1 | 14.3 | 54.4 | **13.4** | 21.0 | 33.1 | 105.7 | 82.3 |
+| erase | **29.8** | 46.7 | 37.1 | 116.0 | 42.1 | 103.8 | 34.8 | 151.3 | 210.8 |
+| iterate | 8.5 | **1.0** | 12.6 | 29.9 | 8.3 | 16.8 | 34.0 | 23.5 | 81.2 |
+| insert (no reserve) | 114.6 | 135.9 | 154.5 | 254.7 | **68.4** | 253.8 | 189.0 | 457.9 | 445.3 |
+| bytes/entry (steady) | 20.0 | 29.5 | 27.0 | 42.8 | 28.6 | 47.2 | 53.8 | **18.1** | 40.4 |
+| bytes/entry (growth peak) | 30.1 | 29.6 | 40.4 | 42.8 | 42.9 | 47.2 | 80.6 | **18.1** | 41.8 |
+
+At 10M the sflat insert rows still vary between runs: reserved 24.4 to
+78.8 ns, no reserve 64.9 to 131.8 ns. With THP off they were 29.3 to 77.6
+and 61.3 to 68.0 ns (see "THP on and off" below).
 
 **n = 100,000,000**
 
-| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
-|---|---|---|---|---|---|---|---|
-| insert (reserved) | **83.6** | 182.4 | 91.2 | 472.1 | 90.3 | 372.1 | 510.5 |
-| find hit (insert order) | 48.1 | **34.9** | 46.1 | 71.1 | 52.1 | 56.6 | 92.4 |
-| find hit (random order) | **45.8** | 57.5 | 46.7 | 99.3 | 52.0 | 90.9 | 107.6 |
-| find miss | 34.7 | 36.5 | **28.6** | 103.7 | 38.3 | 54.2 | 137.7 |
-| erase | 68.1 | 89.1 | **61.7** | 221.3 | 79.4 | 195.5 | 392.1 |
-| iterate | 10.4 | **1.2** | 14.1 | 54.9 | 9.9 | 26.9 | 159.9 |
-| insert (no reserve) | **142.8** | 323.8 | 168.3 | 636.3 | 178.5 | 433.2 | 861.8 |
-| bytes/entry (steady) | **19.6** | 26.7 | 21.5 | 40.6 | 22.8 | 44.1 | 40.1 |
-| bytes/entry (growth peak) | **23.8** | 26.7 | 32.2 | 40.6 | 34.2 | 44.1 | 40.1 |
-
-100M: 1 run.
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | dense_hash | sparse_hash | std |
+|---|---|---|---|---|---|---|---|---|---|
+| insert (reserved) | **42.7** | 144.4 | 92.9 | 384.3 | 75.4 | 293.5 | 108.3 | 660.6 | 427.6 |
+| find hit (insert order) | 35.1 | **32.3** | 46.4 | 57.3 | 47.4 | 51.3 | 36.4 | 219.0 | 70.6 |
+| find hit (random order) | 41.3 | 51.5 | 45.8 | 80.5 | 45.9 | 74.2 | **35.0** | 208.2 | 88.6 |
+| find miss | **25.0** | 35.0 | 28.6 | 82.2 | 26.0 | 42.1 | 42.8 | 260.5 | 98.7 |
+| erase | 56.4 | 77.2 | 51.6 | 162.1 | 69.9 | 169.3 | **42.7** | 239.4 | 272.3 |
+| iterate | 8.9 | **1.1** | 11.8 | 46.7 | 8.6 | 25.0 | 33.5 | 29.1 | 105.9 |
+| insert (no reserve) | **90.6** | 232.2 | 142.5 | 459.9 | 143.5 | 351.3 | 266.1 | 791.5 | 670.3 |
+| bytes/entry (steady) | 19.6 | 26.7 | 21.5 | 40.6 | 22.8 | 44.1 | 43.0 | **17.8** | 40.1 |
+| bytes/entry (growth peak) | 23.8 | 26.7 | 32.2 | 40.6 | 34.2 | 44.1 | 64.4 | **17.8** | 40.1 |
 
 ### Insert latency during growth
 
@@ -188,16 +201,15 @@ than in the tables above. Values are the range of 3 runs.
 
 | Map | total | p99.9 | p99.99 | max |
 |-----|-------|-------|--------|-----|
-| sflat | 2.0 to 3.0 s | 2.2 to 2.4 us | 23 to 32 us | **4.8 to 62 ms** |
-| boost_flat | 2.0 to 2.2 s | **0.4 to 0.5 us** | **16 to 25 us** | 184 to 192 ms |
-| emhash8 | 3.6 to 3.9 s | 2.7 to 3.5 us | 23 to 29 us | 315 to 375 ms |
+| sflat | 1.4 to 2.3 s | 1.9 to 2.1 us | 16 to 20 us | **3.9 to 50 ms** |
+| boost_flat | 1.4 to 1.7 s | **0.3 us** | **15 to 17 us** | 150 to 176 ms |
+| emhash8 | 2.8 to 3.2 s | 2.2 to 2.5 us | 19 to 24 us | 262 to 396 ms |
 
 boost_flat and emhash8 rehash the full table in one insert. sflat spreads
-the rehash over many inserts. Its worst case is 3 to 40 times smaller. The
-remaining 61 to 62 ms in two of the runs is mostly huge page faults and the
-final `MADV_COLLAPSE`; in the third run it was 4.8 ms. (With the older 1.5x
-growth rule the sflat max was 30 ms; with 2x growth the last table is
-larger.)
+the rehash over many inserts. Its worst case is 3 to 45 times smaller. The
+50 ms in two of the runs is mostly huge page faults and the final
+`MADV_COLLAPSE`; in the third run it was 3.9 ms. boost_flat has the lowest
+p99.9 and p99.99.
 
 ### THP on and off (sflat only)
 
@@ -205,40 +217,48 @@ THP cuts TLB misses but makes each first touch of a 2 MiB page slower. This
 VM uses free page reporting, so a new huge page often needs host work too.
 On bare metal a huge page fault usually costs only the time to clear 2 MiB.
 The same runs as above, plus a build with `-DSFLAT_USE_THP=0`. 1M and 10M:
-range of 3 runs. 100M: 1 run.
+range of 3 runs. 100M: median of 3 runs with THP, 1 run without.
 
 | sflat, ns/op | 1M, THP off | 1M, THP on | 10M, THP off | 10M, THP on | 100M, THP off | 100M, THP on |
 |---|---|---|---|---|---|---|
-| insert (reserved) | 37 to 51 | **30 to 35** | 59 to 61 | **51 to 59** | 92.7 | **83.6** |
-| find hit (random order) | 13 to 14 | 12 to 16 | 36 to 39 | **31 to 34** | 55.9 | **45.8** |
-| insert (no reserve) | 79 to 145 | 65 to 214 | **90 to 97** | 82 to 165 | 162.7 | **142.8** |
+| insert (reserved) | 21 to 27 | **18 to 20** | 29 to 78 | 24 to 79 | 77.9 | **42.7** |
+| find hit (random order) | 10 to 14 | 11 to 12 | 29 to 34 | **25 to 30** | 50.5 | **41.3** |
+| insert (no reserve) | 63 to 79 | 51 to 122 | **61 to 68** | 65 to 132 | 104.4 | **90.6** |
 
-At 100M, THP is better in all rows: insert 10 percent, find hit 18
-percent, no-reserve insert 12 percent. At 10M THP also helps find hit (13
-percent). At 1M the table fits in the 260 MiB L3 of this CPU, so the TLB
-gain is small, and huge page faults sometimes make no-reserve insert slow.
-To turn THP off, define `SFLAT_USE_THP=0`.
+At 100M, THP is better in all rows: insert 45 percent, find hit 18
+percent, no-reserve insert 13 percent. At 10M THP helps find hit (about
+18 percent; medians 30.8 and 25.1 ns). At 1M the table fits in the 260 MiB L3 of this CPU, so the
+TLB gain is small, and huge page faults sometimes make no-reserve insert
+slow. To turn THP off, define `SFLAT_USE_THP=0`.
 
 ### Honest assessment
 
-- **memory (steady state)**: sflat uses the least memory at all sizes: 9 to
-  38 percent less than boost_flat, 14 to 42 percent less than absl_flat, and
-  27 to 37 percent less than emhash8.
-- **memory (growth peak)**: at 100M sflat has the lowest peak (23.8
-  bytes/entry). At 10M it is about equal to emhash8 (30.1 and 29.6). At 1M
-  the 2x step makes it 40.5, more than emhash8 (36.0).
-- **insert (reserved)**: sflat is the fastest at 1M and 100M (32.4 and 83.6
-  ns). At 10M boost_flat is 6 percent faster.
-- **insert (no reserve)**: sflat is the fastest at all three sizes in this
-  run (67.2, 83.1 and 142.8 ns). At 1M boost_flat varied a lot (62.3 to
-  104.6 ns over the three runs), so the 1M lead is not clear.
-- **find hit (random order)**: sflat is the fastest at 1M and 100M (12.4
-  and 45.8 ns). At 10M boost_flat is 3 percent faster.
-- **find miss**: boost_flat is 1.2 to 1.7 times faster (was 1.4 to 3.3
-  before the 32-bit overflow words). sflat fills the table to 0.875; after
-  `reserve(n)` boost_flat is only 51 to 64 percent full at 1M and 10M.
-- **erase and iterate**: not a goal. Iterate is faster than boost_flat at
-  all sizes; erase is within 1.6x of boost_flat.
+- **memory (steady state)**: sflat uses less memory than all the other
+  maps except sparse_hash_map: 9 to 38 percent less than boost_flat, 14 to
+  42 percent less than absl_flat, 27 to 37 percent less than emhash8, and
+  38 to 63 percent less than dense_hash_map. sparse_hash_map uses 9
+  percent less than sflat, but its find hit is 4 to 6 times slower and its
+  insert 7 to 15 times slower.
+- **memory (growth peak)**: sparse_hash_map is the lowest at all sizes
+  (17.8 to 20.0 bytes/entry). Of the others, sflat is the lowest at 100M
+  (23.8). At 10M it is about equal to emhash8 (30.1 and 29.6). At 1M the 2x
+  step makes it 40.5, more than emhash8 (36.2).
+- **insert (reserved)**: sflat is the fastest at 1M and 100M (18.1 and
+  42.7 ns; at 100M 43 percent faster than absl_flat). At 10M boost_flat is
+  3 percent faster, and the sflat runs varied a lot.
+- **insert (no reserve)**: sflat is the fastest at 1M and 100M (51.2 and
+  90.6 ns). At 10M absl_flat is faster (68.4 against 114.6), but the sflat
+  runs varied from 64.9 to 131.8 ns.
+- **find hit (random order)**: sflat is the fastest at 10M (25.1 ns). At
+  1M boost_flat is 11 percent faster. At 100M dense_hash_map is 15 percent
+  faster (35.0 against 41.3) at 2.2 times the memory; sflat is faster than
+  all the other maps.
+- **find miss**: sflat is the fastest at 100M (25.0 ns). At 1M and 10M
+  boost_flat or absl_flat is 1.1 to 1.3 times faster (was 1.2 to 1.7 times
+  in the previous run).
+- **erase and iterate**: not a goal. Erase is the fastest at 10M and within
+  1.35x of the best at the other sizes. Iterate is faster than boost_flat
+  at all sizes.
 
 ## Intel Celeron N5105, bare metal
 
@@ -780,8 +800,8 @@ is even faster for misses.
   and 100M it is 1.2 times slower than boost_flat and 1.4 to 1.5 times
   slower than absl_flat (before the tuning: 1.5 to 2.0 times). The x86-64
   machines differ mainly because of THP: sflat uses 2 MiB pages on Linux,
-  and there was its lead at large sizes (Xeon, 100M: 45.8 ns with THP,
-  55.9 without, boost_flat 46.7). macOS has no such path.
+  and there was its lead at large sizes (Xeon, 100M: 41.3 ns with THP,
+  50.5 without, boost_flat 45.8). macOS has no such path.
 - **insert**: not tuned yet. boost_flat is the fastest. sflat is second
   or third for reserved inserts and 1.2 to 1.4 times slower than
   boost_flat without reserve.
