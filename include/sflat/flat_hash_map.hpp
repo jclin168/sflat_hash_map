@@ -1185,29 +1185,36 @@ class flat_hash_map {
     return find_ptr_slow(key, h);
   }
 
-  // The next-group probe of find_ptr() when SFLAT_FIND_NEXT_INLINE is 0: a
-  // key whose home group overflowed. Keys that spill from the home group
-  // take the first group after it with an empty slot. A slot never becomes
-  // empty again (erase leaves a tombstone) until a rehash or migration
-  // rebuilds the table, so an empty slot in the next group proves that the
-  // key is not further on. Not migrating (old_cap_ == 0).
+  // The probe past the home group when SFLAT_FIND_NEXT_INLINE is 0: a key
+  // whose home group overflowed. Keys that spill from the home group take
+  // the first group after it with an empty slot. A slot never becomes empty
+  // again (erase leaves a tombstone) until a rehash or migration rebuilds the
+  // table, so the first empty slot after the home group proves that the key
+  // is not further on. Not migrating (old_cap_ == 0).
+  // It probes on from the next group itself instead of handing over to
+  // find_ptr_slow(), which would start again at the home group: full groups
+  // come in runs, so the next group often has no empty slot (41 percent of
+  // the hits and 81 percent of the misses that get here, i5-3230M at 10M).
 #if defined(__GNUC__) || defined(__clang__)
   __attribute__((noinline, pure))
 #endif
   value_type* find_ptr_next(slow_key_arg key, uint64_t h,
                             size_t base) const noexcept {
-    size_t nb = base + kWidth;
-    if (nb == cap_) nb = 0;
-    const Group g2 = Group::Load(ctrl_ + nb);
-    Mask m2 = g2.MatchH2(h);
-    while (m2) {
-      const value_type* e = reinterpret_cast<const value_type*>(
-          &slots_[nb + Group::Lane(m2)]);
-      if (equal_(e->first, key)) return const_cast<value_type*>(e);
-      m2 &= m2 - 1;
+    size_t nb = base;
+    for (size_t k = kWidth; k < cap_; k += kWidth) {
+      nb += kWidth;
+      if (nb == cap_) nb = 0;
+      const Group g2 = Group::Load(ctrl_ + nb);
+      Mask m2 = g2.MatchH2(h);
+      while (m2) {
+        const value_type* e = reinterpret_cast<const value_type*>(
+            &slots_[nb + Group::Lane(m2)]);
+        if (equal_(e->first, key)) return const_cast<value_type*>(e);
+        m2 &= m2 - 1;
+      }
+      if (g2.Match(detail::kEmpty)) return nullptr;
     }
-    if (g2.Match(detail::kEmpty)) return nullptr;
-    return find_ptr_slow(key, h);
+    return nullptr;
   }
 
   // The rest of find_ptr(): probe past the home group, and the old table of
