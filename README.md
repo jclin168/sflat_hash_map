@@ -500,7 +500,7 @@ All tests pass on each back end:
 |----------|-------------------|
 | AVX2 | x86-64 Linux, `-march=native`, also with ASan and UBSan; `clang++ -arch x86_64 -mavx2` under Rosetta 2 on Apple M2 |
 | SSE2 | `-msse4.2` (no AVX2) on x86-64 Linux, also with ASan and UBSan; `clang++ -arch x86_64` under Rosetta 2 |
-| NEON | Apple M2, also with ASan and UBSan |
+| NEON | Apple M2, macOS 26.6, Apple clang 21, also with ASan and UBSan |
 | SWAR | `-DSFLAT_NO_SIMD=1` on x86-64 Linux and on Apple M2, also with ASan and UBSan |
 
 ## License

@@ -94,6 +94,8 @@ use `taskset -c <cpu> ./build/bench ...` (the child processes inherit it).
 |------|-------|
 | CPU | Intel Xeon @ 2.10 GHz |
 | Memory | 15 GiB |
+| OS | Ubuntu 24.04.5 LTS |
+| Compiler | g++ 13.3.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
 
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
@@ -259,6 +261,8 @@ slow. To turn THP off, define `SFLAT_USE_THP=0`.
 |------|-------|
 | CPU | Intel Celeron N5105 @ 2.00 GHz |
 | Memory | 7 GiB |
+| OS | Ubuntu 26.04.1 LTS |
+| Compiler | g++ 15.2.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
 
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
@@ -399,6 +403,8 @@ slower), there is no THP penalty on this machine, even at 1M.
 |------|-------|
 | CPU | Intel Core i5-3230M @ 2.60 GHz |
 | Memory | 15 GiB |
+| OS | Ubuntu 26.04.1 LTS |
+| Compiler | g++ 15.2.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
 
 - sflat version: with the 32-bit overflow words and the group-wise
   iteration (see "Profiling on the i5-3230M" below). The other machines
@@ -603,6 +609,8 @@ Tried and not kept:
 |------|-------|
 | CPU | Apple M2 @ 3.49 GHz |
 | Memory | 16 GiB |
+| OS | macOS 26.6.2 |
+| Compiler | Apple clang 21.0.0, libc++, `-O3 -mcpu=native -std=c++17 -DNDEBUG` |
 
 - Comparison targets: emhash8 (upstream commit 801d02a),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.86.0),
