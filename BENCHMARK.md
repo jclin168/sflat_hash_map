@@ -5,12 +5,12 @@ is in the [README](README.md).
 
 The benchmark has been run on four machines:
 
-| Machine | Type | sflat back end | Sizes |
+| CPU | Memory | sflat back end | Sizes |
 |---|---|---|---|
-| [Intel Xeon (Emerald Rapids)](#intel-xeon-emerald-rapids-kvm-virtual-machine) | KVM virtual machine (cloud) | AVX2 | 1M, 10M, 100M |
-| [Intel Celeron N5105](#intel-celeron-n5105-bare-metal) | Bare-metal mini PC | SSE2 (no AVX2) | 1M, 10M, 50M |
-| [Intel Core i5-3230M](#intel-core-i5-3230m-bare-metal) | Bare-metal laptop | SSE2 (AVX, no AVX2) | 1M, 10M, 100M |
-| [Apple M2](#apple-m2-macbook-air-macos) | MacBook Air (macOS) | NEON | 1M, 10M, 100M |
+| [Intel Xeon @ 2.10 GHz](#intel-xeon) | 15 GiB | AVX2 | 1M, 10M, 100M |
+| [Intel Celeron N5105 @ 2.00 GHz](#intel-celeron-n5105) | 7 GiB | SSE2 (no AVX2) | 1M, 10M, 50M |
+| [Intel Core i5-3230M @ 2.60 GHz](#intel-core-i5-3230m) | 15 GiB | SSE2 (no AVX2) | 1M, 10M, 100M |
+| [Apple M2 @ 3.49 GHz](#apple-m2) | 16 GiB | NEON | 1M, 10M, 100M |
 
 All use the same program (`bench/bench.cpp`). The Xeon, the Celeron and the
 i5 use the same versions of the comparison maps; the M2 uses the versions
@@ -86,23 +86,14 @@ For the THP-off runs, configure a second build with
 `-DCMAKE_CXX_FLAGS=-DSFLAT_USE_THP=0`. To pin the run to one core on Linux,
 use `taskset -c <cpu> ./build/bench ...` (the child processes inherit it).
 
-## Intel Xeon (Emerald Rapids), KVM virtual machine
+## Intel Xeon
 
 ### Test environment
 
 | Item | Value |
 |------|-------|
-| Machine | KVM virtual machine (cloud) |
-| CPU | Intel Xeon @ 2.10 GHz, family 6 model 207 (5th gen Xeon Scalable, Emerald Rapids) |
-| Cores | 4 vCPU (4 cores, 1 thread per core, 1 socket) |
-| ISA | SSE4.2, AVX2, BMI2, AVX-512 |
-| Cache | L1d 48 KiB per core, L2 2 MiB per core, L3 260 MiB shared |
-| Memory | 15 GiB, no swap |
-| OS | Ubuntu 24.04.5 LTS |
-| Kernel | Linux 6.18.44 |
-| THP | `madvise` (defrag `madvise`); free page reporting on |
-| C library | glibc 2.39 |
-| Compiler | g++ 13.3.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
+| CPU | Intel Xeon @ 2.10 GHz |
+| Memory | 15 GiB |
 
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
@@ -116,8 +107,8 @@ use `taskset -c <cpu> ./build/bench ...` (the child processes inherit it).
 - Test: `uint64_t -> uint64_t` with random keys. Each map runs in its own
   child process. Memory is the child peak RSS minus the baseline (the input
   arrays only).
-- Before each size, a warm-up child touches and frees memory. In a VM the
-  host backs guest memory on first use, which is very slow. Without the
+- Before each size, a warm-up child touches and frees memory. On this machine
+  the first touch of a page is very slow. Without the
   warm-up, the first map in the run order pays this cost. Before the whole
   run, a separate program touched 12 GiB twice.
 - 1M, 10M and 100M: median of 3 runs.
@@ -136,9 +127,9 @@ value in the row.
 - "growth peak" is the peak RSS of the no-reserve test.
 - sflat grows 2x below 2 GiB, so all three sizes here use the 2x tier.
 
-The speed of this VM changes from run to run. During this run a first
+The speed of this machine changes from run to run. During this run a first
 touch of new memory took 1.7 to 1.8 microseconds per 4 KiB page, once 12
-(bare metal: about 0.25). This is lower than in earlier runs, and the
+(usual value: about 0.25). This is lower than in earlier runs, and the
 three runs agree better. Compare the maps in the same table, not with
 other runs.
 
@@ -213,9 +204,9 @@ p99.9 and p99.99.
 
 ### THP on and off (sflat only)
 
-THP cuts TLB misses but makes each first touch of a 2 MiB page slower. This
-VM uses free page reporting, so a new huge page often needs host work too.
-On bare metal a huge page fault usually costs only the time to clear 2 MiB.
+THP cuts TLB misses but makes each first touch of a 2 MiB page slower. On
+this machine a new huge page often costs much more than the time to clear
+2 MiB.
 The same runs as above, plus a build with `-DSFLAT_USE_THP=0`. 1M and 10M:
 range of 3 runs. 100M: median of 3 runs with THP, 1 run without.
 
@@ -260,24 +251,14 @@ slow. To turn THP off, define `SFLAT_USE_THP=0`.
   1.35x of the best at the other sizes. Iterate is faster than boost_flat
   at all sizes.
 
-## Intel Celeron N5105, bare metal
+## Intel Celeron N5105
 
 ### Test environment
 
 | Item | Value |
 |------|-------|
-| Machine | Bare-metal mini PC (no virtualization) |
-| CPU | Intel Celeron N5105 @ 2.00 GHz, family 6 model 156 (Jasper Lake, Tremont cores) |
-| Cores | 4 cores, 1 thread per core, 1 socket |
-| ISA | SSE4.2, AES-NI, SHA-NI, GFNI. **No AVX, AVX2 or BMI2**, so sflat uses the SSE2 16-slot group path |
-| Cache | L1d 32 KiB per core, L2 1.5 MiB shared, L3 4 MiB shared |
-| Memory | 7 GiB usable, 1 GiB swap |
-| OS | Ubuntu 26.04.1 LTS |
-| Kernel | Linux 7.0.0-31-generic |
-| THP | `madvise` (defrag `madvise`) |
-| CPU frequency | `intel_pstate`, governor `powersave` (HWP) |
-| C library | glibc 2.43 |
-| Compiler | g++ 15.2.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
+| CPU | Intel Celeron N5105 @ 2.00 GHz |
+| Memory | 7 GiB |
 
 - Comparison targets: emhash8 (upstream commit 801d02a, load factor 0.80),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.83),
@@ -288,8 +269,8 @@ slow. To turn THP off, define `SFLAT_USE_THP=0`.
   child process. Memory is the child peak RSS minus the baseline (the input
   arrays only).
 - Before each size, a warm-up child touches and frees memory. (This matters
-  most in a VM, where the host backs guest memory on first use.)
-- 1M and 10M: median of 3 runs. The runs agree well on this bare-metal
+  most where the first touch of a page is slow, as on the Xeon.)
+- 1M and 10M: median of 3 runs. The runs agree well on this
   machine: the sflat rows vary by less than 2 percent, except no-reserve
   insert at 1M (141 to 156 ns). 50M: 1 run.
 - 100M is not measured. The four input arrays alone take 3.2 GB, and the
@@ -383,8 +364,8 @@ lead of sflat in the 10M and 50M tables above therefore comes from huge
 pages, not from the probing scheme. Other maps can get a similar gain with
 an allocator that uses huge pages, or with THP set to `always`.
 
-Unlike on the Xeon VM (where the fault cost of huge pages made small tables
-slower), there is no THP penalty on this bare-metal machine, even at 1M.
+Unlike on the Xeon (where the fault cost of huge pages made small tables
+slower), there is no THP penalty on this machine, even at 1M.
 
 ### Honest assessment
 
@@ -410,24 +391,14 @@ slower), there is no THP penalty on this bare-metal machine, even at 1M.
 - **SSE2 only**: this CPU has no AVX2, so sflat probes 16-slot groups. The
   results show that the SSE2 path is competitive.
 
-## Intel Core i5-3230M, bare metal
+## Intel Core i5-3230M
 
 ### Test environment
 
 | Item | Value |
 |------|-------|
-| Machine | Lenovo laptop (model 20138), on AC power, no virtualization |
-| CPU | Intel Core i5-3230M @ 2.60 GHz (3.2 GHz turbo), family 6 model 58 (Ivy Bridge) |
-| Cores | 2 cores, 2 threads per core, 1 socket |
-| ISA | SSE4.2, AVX, AES-NI. **No AVX2 or BMI2**, so sflat uses the SSE2 16-slot group path |
-| Cache | L1d 32 KiB per core, L2 256 KiB per core, L3 3 MiB shared |
-| Memory | 15 GiB, 2 GiB swap |
-| OS | Ubuntu 26.04.1 LTS |
-| Kernel | Linux 7.0.0-38-generic |
-| THP | `madvise` (defrag `madvise`) |
-| CPU frequency | `intel_cpufreq`, governor `conservative` |
-| C library | glibc 2.43 |
-| Compiler | g++ 15.2.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
+| CPU | Intel Core i5-3230M @ 2.60 GHz |
+| Memory | 15 GiB |
 
 - sflat version: with the 32-bit overflow words and the group-wise
   iteration (see "Profiling on the i5-3230M" below). The other machines
@@ -624,19 +595,14 @@ Tried and not kept:
   `reserve` (power-of-two group count); this is most of its lead over
   sflat with 4 KiB pages. It costs about 30 percent more memory, so the
   default stays 0.875.
-## Apple M2, MacBook Air (macOS)
+## Apple M2
 
 ### Test environment
 
 | Item | Value |
 |------|-------|
-| Machine | MacBook Air (Mac14,2), fanless, on AC power |
-| CPU | Apple M2, 8 cores (4 performance, 4 efficiency) |
-| ISA | ARMv8.6-A, NEON (sflat uses the NEON x16 back end) |
-| Cache | P cores: L1d 128 KiB per core, L2 16 MiB shared. E cores: L1d 64 KiB, L2 4 MiB. 128-byte cache lines |
-| Memory | 16 GiB LPDDR5 (unified), 16 KiB pages |
-| OS | macOS 26.6.2 (25G83) |
-| Compiler | Apple clang 21.0.0, libc++, `-O3 -mcpu=native -std=c++17 -DNDEBUG` |
+| CPU | Apple M2 @ 3.49 GHz |
+| Memory | 16 GiB |
 
 - Comparison targets: emhash8 (upstream commit 801d02a),
   boost::unordered_flat_map and boost::unordered_map (Boost 1.86.0),

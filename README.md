@@ -376,7 +376,7 @@ have no effect.
 THP helps most when the table is much larger than the last-level cache.
 On the Xeon (260 MiB L3) at 100M entries, THP made find hit 18 percent
 faster. At 1M entries the gain is small, and the huge page faults can make
-inserts slower in a virtual machine (see BENCHMARK.md).
+inserts slower when page faults are slow (see BENCHMARK.md).
 
 On macOS and other non-Linux systems `SFLAT_USE_MMAP` defaults to 0: all
 arrays come from `operator new`, so there is no page release and no THP.
@@ -446,8 +446,9 @@ Limits (common trade-offs of open addressing):
 ## Benchmark
 
 The full results are in [BENCHMARK.md](BENCHMARK.md). It covers four
-machines: an Intel Xeon KVM virtual machine (AVX2), an Intel Celeron N5105
-and an Intel Core i5-3230M on bare metal (SSE2), and an Apple M2 (NEON). It
+machines: an Intel Xeon @ 2.10 GHz with 15 GiB (AVX2), an Intel Celeron
+N5105 @ 2.00 GHz with 7 GiB and an Intel Core i5-3230M @ 2.60 GHz with
+15 GiB (SSE2), and an Apple M2 @ 3.49 GHz with 16 GiB (NEON). It
 also has the build and run steps.
 
 In short (`uint64_t -> uint64_t`, random keys, compared with emhash8,
@@ -463,7 +464,7 @@ the Xeon also Google dense_hash_map and sparse_hash_map):
   1M on the Xeon, boost_flat is 11 percent faster. On the M2 (no THP)
   absl_flat and boost_flat are faster at 10M and 100M.
 - **Insert**: on the Celeron and the i5, sflat is the fastest in most
-  rows. On the Xeon VM, sflat is the fastest at 1M and 100M, and
+  rows. On the Xeon, sflat is the fastest at 1M and 100M, and
   boost_flat is 3 percent faster at 10M (reserved insert). On the M2,
   boost_flat is the fastest.
 - On the machines with small caches and TLBs (Celeron, i5) much of the lead
@@ -499,7 +500,7 @@ All tests pass on each back end:
 |----------|-------------------|
 | AVX2 | x86-64 Linux, `-march=native`, also with ASan and UBSan; `clang++ -arch x86_64 -mavx2` under Rosetta 2 on Apple M2 |
 | SSE2 | `-msse4.2` (no AVX2) on x86-64 Linux, also with ASan and UBSan; `clang++ -arch x86_64` under Rosetta 2 |
-| NEON | Apple M2, macOS 26.6, Apple clang 21, also with ASan and UBSan |
+| NEON | Apple M2, also with ASan and UBSan |
 | SWAR | `-DSFLAT_NO_SIMD=1` on x86-64 Linux and on Apple M2, also with ASan and UBSan |
 
 ## License
