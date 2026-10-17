@@ -4,7 +4,9 @@
 // boost::unordered_flat_map vs boost::unordered_map vs std::unordered_map,
 // and with -DHAS_ABSL also absl::flat_hash_map and absl::node_hash_map,
 // and with -DHAS_SPARSEHASH also google::dense_hash_map and
-// google::sparse_hash_map.
+// google::sparse_hash_map, with -DHAS_TSL also tsl::robin_map (power of two,
+// mod and prime growth policies), with -DHAS_SKA also ska::flat_hash_map
+// (Fibonacci and prime hash policies), and with -DHAS_FOLLY also folly::F14ValueMap.
 //
 // Each scenario runs in a forked child so the parent can read the child's
 // peak RSS (ru_maxrss) via wait4() for an honest per-map memory number.
@@ -32,6 +34,18 @@
 #ifdef HAS_ABSL
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/node_hash_map.h>
+#endif
+
+#ifdef HAS_TSL
+#include <tsl/robin_map.h>
+#endif
+
+#ifdef HAS_SKA
+#include <flat_hash_map.hpp>
+#endif
+
+#ifdef HAS_FOLLY
+#include <folly/container/F14Map.h>
 #endif
 
 #include <chrono>
@@ -125,6 +139,26 @@ template <>
 struct Ops<DenseHashMap> : SparseOps<DenseHashMap> {};
 template <>
 struct Ops<SparseHashMap> : SparseOps<SparseHashMap> {};
+#endif
+
+#ifdef HAS_TSL
+// tsl::robin_map with its default hash (std::hash) and the three growth
+// policies: power of two (default, mask), mod (any size, 1.5x, modulo) and
+// prime (a table of primes, modulo by a constant).
+template <typename Policy>
+using TslRobinMap =
+    tsl::robin_map<uint64_t, uint64_t, std::hash<uint64_t>,
+                   std::equal_to<uint64_t>,
+                   std::allocator<std::pair<uint64_t, uint64_t>>, false,
+                   Policy>;
+#endif
+
+#ifdef HAS_SKA
+// ska::flat_hash_map uses Fibonacci hashing on a power of two by default. A
+// hash with a hash_policy typedef selects the prime sizes.
+struct SkaPrimeHash : std::hash<uint64_t> {
+  typedef ska::prime_number_hash_policy hash_policy;
+};
 #endif
 
 // shuffled: the keys in a random order (part of the baseline memory).
@@ -314,6 +348,20 @@ const Entry kMaps[] = {
     SFLAT_BENCH_MAP("dense_hash", DenseHashMap),
     SFLAT_BENCH_MAP("sparse_hash", SparseHashMap),
 #endif
+#ifdef HAS_TSL
+    SFLAT_BENCH_MAP("tsl_robin",
+                    TslRobinMap<tsl::rh::power_of_two_growth_policy<2>>),
+    SFLAT_BENCH_MAP("tsl_mod", TslRobinMap<tsl::rh::mod_growth_policy<>>),
+    SFLAT_BENCH_MAP("tsl_prime", TslRobinMap<tsl::rh::prime_growth_policy>),
+#endif
+#ifdef HAS_SKA
+    SFLAT_BENCH_MAP("ska_flat", ska::flat_hash_map<uint64_t, uint64_t>),
+    SFLAT_BENCH_MAP("ska_prime",
+                    ska::flat_hash_map<uint64_t, uint64_t, SkaPrimeHash>),
+#endif
+#ifdef HAS_FOLLY
+    SFLAT_BENCH_MAP("folly_f14", folly::F14ValueMap<uint64_t, uint64_t>),
+#endif
     SFLAT_BENCH_MAP("std", std::unordered_map<uint64_t, uint64_t>),
 };
 
@@ -337,8 +385,8 @@ int main(int argc, char** argv) {
 #else
   const char* simd = "SWAR";
 #endif
-  std::printf("\n# sflat group: %s x%zu, flags: -O3 -std=c++17\n", simd,
-              sflat::detail::Group::kWidth);
+  std::printf("\n# sflat group: %s x%zu, flags: -O3, __cplusplus %ld\n", simd,
+              sflat::detail::Group::kWidth, static_cast<long>(__cplusplus));
   std::printf("# times are ns/op; memory is child peak RSS minus baseline\n\n");
 
   for (size_t n : sizes) {
