@@ -318,24 +318,28 @@ and an Intel Core i5-3230M on bare metal (SSE2), and an Apple M2 (NEON). It
 also has the build and run steps.
 
 In short (`uint64_t -> uint64_t`, random keys, compared with emhash8,
-boost::unordered_flat_map, absl::flat_hash_map and the node-based maps):
+boost::unordered_flat_map, absl::flat_hash_map, the node-based maps, and on
+the Xeon also Google dense_hash_map and sparse_hash_map):
 
 - **Memory**: sflat uses the least memory in steady state on every machine
-  (19.5 to 21.8 bytes/entry). On Linux at 50M to 100M entries it also has
-  the lowest growth peak.
+  (19.5 to 21.8 bytes/entry), except Google sparse_hash_map on the Xeon (9
+  percent less, but 4 to 6 times slower find hit). On Linux at 50M to 100M
+  entries sflat also has the lowest growth peak, again except
+  sparse_hash_map.
 - **Find hit (random order)**: on Linux x86-64, sflat is the fastest at
-  the largest size of each machine. On the Xeon VM, boost_flat is 3
-  percent faster at 10M. On the M2 (no THP) absl_flat
+  the largest size of each machine, except Google dense_hash_map on the
+  Xeon at 100M (15 percent faster, at 2.2 times the memory). On the Xeon
+  VM, boost_flat is 11 percent faster at 1M. On the M2 (no THP) absl_flat
   and boost_flat are faster at 10M and 100M.
 - **Insert**: on the Celeron and the i5, sflat is the fastest in most
   rows. On the Xeon VM, sflat is the fastest at 1M and 100M, and
-  boost_flat is 6 percent faster at 10M (reserved insert). On the M2,
+  boost_flat is 3 percent faster at 10M (reserved insert). On the M2,
   boost_flat is the fastest.
 - On the machines with small caches and TLBs (Celeron, i5) much of the lead
   of sflat comes from transparent huge pages, not from the probing scheme.
-- **Find miss**: boost_flat is faster on every machine. With the current
-  code it is 1.1 to 1.3 times faster on the i5-3230M and 1.2 to 1.7 times
-  on the Xeon.
+- **Find miss**: on the Xeon at 100M sflat is the fastest. Otherwise
+  boost_flat or absl_flat is faster: 1.1 to 1.3 times on the Xeon at 1M
+  and 10M and on the i5-3230M.
 - **Iterate**: not a goal; emhash8 is much faster.
 
 ## Correctness tests
