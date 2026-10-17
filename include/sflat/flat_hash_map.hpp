@@ -96,16 +96,30 @@
 #define SFLAT_LAZY_OVERFLOW 0
 #endif
 #endif
-// SFLAT_FIND_NEXT_INLINE=1: when the home group's overflow bit is set,
-// find() also probes the next group inline, before it calls the out-of-line
-// find_ptr_slow(). Most spilled keys sit in the next group.
+// When the home group's overflow bit is set, find() probes the next group
+// (most spilled keys sit there) before the full probe in find_ptr_slow().
+// SFLAT_FIND_NEXT_INLINE=1 does that next-group probe inside the inlined
+// part of find(); 0 does it in the out-of-line find_ptr_next(). Default: 1
+// on NEON (measured on Apple M2), 0 elsewhere. On x86-64 the larger inlined
+// part made find() less likely to be inlined at all, and forcing it inline
+// slowed down inserts in the same function (i5-3230M, BENCHMARK.md).
 #if !defined(SFLAT_FIND_NEXT_INLINE)
+#if defined(SFLAT_SIMD_NEON)
 #define SFLAT_FIND_NEXT_INLINE 1
+#else
+#define SFLAT_FIND_NEXT_INLINE 0
 #endif
-#if defined(SFLAT_SIMD_NEON) && (defined(__GNUC__) || defined(__clang__))
+#endif
+// The inlined part of find() is forced inline. Without that, a compiler may
+// keep it out of line in a large translation unit (GCC: "inline-unit-growth
+// limit reached"), and then every find and erase pays a call: misses and
+// erases got about 25 percent slower on the i5-3230M.
+#if !defined(SFLAT_FIND_INLINE)
+#if defined(__GNUC__) || defined(__clang__)
 #define SFLAT_FIND_INLINE __attribute__((always_inline))
 #else
 #define SFLAT_FIND_INLINE
+#endif
 #endif
 
 // insert_with() is forced inline and its rare paths are kept out of line, so
@@ -1093,16 +1107,25 @@ class flat_hash_map {
     return nullptr;
   }
 
+  // Small trivially copyable keys go to the slow path by value, so callers
+  // need not keep the key in memory for it.
+  using slow_key_arg = typename std::conditional<
+      std::is_trivially_copyable<key_type>::value &&
+          sizeof(key_type) <= 2 * sizeof(void*),
+      key_type, const key_type&>::type;
+
   // Element with key, or nullptr. Never modifies the map.
   //
   // The inlined part handles the common cases: a hit in the home group, and
   // a miss that the home group proves (a clear overflow bit), with
   // no migration. An empty slot in the home group would prove a miss too,
   // but testing it costs instructions on every miss; a set overflow bit is
-  // rare enough that the next-group probe below is cheaper. Everything else goes to find_ptr_slow(). A
-  // small inlined part keeps callers' loops short: on Apple M2 a DRAM-bound
-  // find loop gets about 0.4 ns slower per extra instruction, since fewer
-  // finds then fit in the out-of-order window.
+  // rare enough that a probe of the next group is cheaper (inline or in
+  // find_ptr_next(), see SFLAT_FIND_NEXT_INLINE). Everything else goes to
+  // find_ptr_slow(). A small inlined part keeps callers' loops short: a
+  // DRAM-bound find loop gets slower with every extra instruction (about
+  // 0.4 ns each on Apple M2), since fewer finds then fit in the
+  // out-of-order window.
   SFLAT_FIND_INLINE value_type* find_ptr(const key_type& key,
                                          uint64_t h) const noexcept {
     const size_t base = detail::HomeSlot(h, cap_);  // home group * kWidth
@@ -1155,17 +1178,37 @@ class flat_hash_map {
         m2 &= m2 - 1;
       }
       if (g2.Match(detail::kEmpty)) return nullptr;
+#else
+      return find_ptr_next(key, h, base);
 #endif
     }
     return find_ptr_slow(key, h);
   }
 
-  // Small trivially copyable keys go to the slow path by value, so callers
-  // need not keep the key in memory for it.
-  using slow_key_arg = typename std::conditional<
-      std::is_trivially_copyable<key_type>::value &&
-          sizeof(key_type) <= 2 * sizeof(void*),
-      key_type, const key_type&>::type;
+  // The next-group probe of find_ptr() when SFLAT_FIND_NEXT_INLINE is 0: a
+  // key whose home group overflowed. Keys that spill from the home group
+  // take the first group after it with an empty slot. A slot never becomes
+  // empty again (erase leaves a tombstone) until a rehash or migration
+  // rebuilds the table, so an empty slot in the next group proves that the
+  // key is not further on. Not migrating (old_cap_ == 0).
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((noinline, pure))
+#endif
+  value_type* find_ptr_next(slow_key_arg key, uint64_t h,
+                            size_t base) const noexcept {
+    size_t nb = base + kWidth;
+    if (nb == cap_) nb = 0;
+    const Group g2 = Group::Load(ctrl_ + nb);
+    Mask m2 = g2.MatchH2(h);
+    while (m2) {
+      const value_type* e = reinterpret_cast<const value_type*>(
+          &slots_[nb + Group::Lane(m2)]);
+      if (equal_(e->first, key)) return const_cast<value_type*>(e);
+      m2 &= m2 - 1;
+    }
+    if (g2.Match(detail::kEmpty)) return nullptr;
+    return find_ptr_slow(key, h);
+  }
 
   // The rest of find_ptr(): probe past the home group, and the old table of
   // an ongoing migration. (Probes the home group again; it is in cache.)
