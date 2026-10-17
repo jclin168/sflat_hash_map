@@ -22,6 +22,98 @@ where memory is important.
 
 These requirements are the reasons for this project.
 
+## Key advantages
+
+### Memory grows in proportion to the entries
+
+boost::unordered_flat_map, absl::flat_hash_map, emhash8 and
+google::dense_hash_map use a power-of-two capacity. Their table size can
+only be 8, 16, 32, 64 or 128 GiB. When the number of entries is a little
+more than the limit of one step, the table goes to the next step: twice the
+memory.
+
+sflat does not use a power-of-two capacity. `reserve(n)` gives
+`ceil(n / 0.875)` slots, rounded up to a multiple of the group width (32
+with AVX2). Thus the memory is about 19.5 bytes per entry for
+`uint64_t -> uint64_t` at all sizes.
+
+Table size and the maximum number of entries that fit
+(`uint64_t -> uint64_t`, after `reserve`):
+
+| Table size | boost_flat | absl_flat | dense_hash_map | sflat for the same entries |
+|---|---|---|---|---|
+| about 16 GiB | 0.88 billion | 0.94 billion (17 GiB) | 0.54 billion | 16.0 GiB for 0.88 billion |
+| about 32 GiB | 1.76 billion | 1.88 billion (34 GiB) | 1.07 billion | 32.0 GiB for 1.76 billion |
+| about 64 GiB | 3.52 billion | 3.76 billion (68 GiB) | 2.15 billion | 63.9 GiB for 3.52 billion |
+| about 128 GiB | 7.05 billion | 7.52 billion (136 GiB) | 4.29 billion | 127.1 GiB for 7.0 billion |
+
+Example: 1 billion entries need 32 GiB with boost_flat, 34 GiB with
+absl_flat and 32 GiB with dense_hash_map. sflat needs about 18.2 GiB.
+After the inserts the whole table is resident (random keys write to almost
+every page), so this difference is real RSS, not only address space.
+
+The design is also flexible:
+
+- The capacity can be any multiple of the group width. You can set the
+  load with `max_load_factor()`.
+- Without `reserve`, a small table grows 2x, a table of 2 GiB or more grows
+  1.5x, and a table of 10 GiB or more grows 1.25x. You can change the limits
+  with `SFLAT_GROW_2X_BELOW` and `SFLAT_GROW_1_5X_BELOW`.
+
+### Less memory pressure: huge pages and page release
+
+sflat manages its own pages on Linux. This is the main difference from the
+other maps. It uses `mmap` and `madvise` in four ways:
+
+- **Page release during growth (`MADV_DONTNEED`).** Growth is incremental
+  and moves the entries in index order. The map gives the old pages behind
+  the migration front back to the kernel, one 2 MiB page at a time. Thus
+  the peak is near the size of the new table, not old + new. At 100M
+  entries the measured growth peak is 23.8 bytes/entry. boost_flat needs
+  32.2, absl_flat 34.2 and dense_hash_map 64.4.
+- **Huge pages (`MADV_HUGEPAGE`).** Large tables use 2 MiB pages. This
+  cuts TLB misses. At 100M entries on the Xeon, THP makes find hit 18
+  percent faster and reserved insert 45 percent faster.
+- **No early commit (`MADV_NOHUGEPAGE` ahead of the front).** During
+  growth, only the pages near the migration front get the huge page hint.
+  A rare write far ahead does not commit a full 2 MiB page. At the end,
+  `MADV_COLLAPSE` converts the remaining 4 KiB pages.
+- **Lazy commit after `reserve`.** `reserve` writes only the control bytes
+  (about 1 byte per slot). The kernel commits the slot pages when inserts
+  write to them.
+
+The other maps use `malloc` with 4 KiB pages and keep the old and new
+tables in memory together during a rehash.
+
+See "Growth memory (Linux)" and "Transparent huge pages (THP)" below for
+the details.
+
+### Speed
+
+Measured on the Xeon at 100M entries (`uint64_t -> uint64_t`, random keys,
+ns/op, lower is better; see [BENCHMARK.md](BENCHMARK.md)):
+
+| | sflat | boost_flat | absl_flat | dense_hash_map | std::unordered_map | boost_node | absl_node |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | **42.7** | 92.9 | 75.4 | 108.3 | 427.6 | 384.3 | 293.5 |
+| find hit (random order) | 41.3 | 45.8 | 45.9 | **35.0** | 88.6 | 80.5 | 74.2 |
+| find miss | **25.0** | 28.6 | 26.0 | 42.8 | 98.7 | 82.2 | 42.1 |
+| insert (no reserve) | **90.6** | 142.5 | 143.5 | 266.1 | 670.3 | 459.9 | 351.3 |
+| bytes/entry (steady) | **19.6** | 21.5 | 22.8 | 43.0 | 40.1 | 40.6 | 44.1 |
+
+- **Against the other flat maps** the speed is close. At 100M sflat is the
+  fastest on insert and find miss. dense_hash_map is 15 percent faster on
+  find hit, but it uses 2.2 times the memory. At 1M boost_flat is 11
+  percent faster on find hit. At 1M and 10M boost_flat or absl_flat is 1.1
+  to 1.3 times faster on find miss.
+- **Against the node-based maps** (`std::unordered_map`, boost and absl
+  node maps) sflat is much faster: reserved insert 7 to 10 times, insert
+  without reserve 4 to 7 times, and find hit 1.8 to 2.2 times. It also
+  uses about half the memory.
+- google::sparse_hash_map is not in the table. It uses about 9 percent less
+  memory than sflat, but its find hit is 4 to 6 times slower and its insert
+  7 to 15 times slower.
+
 ## File structure
 
 ```
