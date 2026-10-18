@@ -667,9 +667,11 @@ class flat_hash_map {
         : map_(m), bucket_(b), idx_(i) {
       if (map_) seek();
     }
+    // Unified slot index, so the old table of a migration is covered too.
     void seek() noexcept {
-      while (idx_ < map_->cap_ &&
-             !(detail::IsFull(map_->ctrl_[idx_]) &&
+      const size_t stop = map_->cap_ + map_->old_cap_;
+      while (idx_ < stop &&
+             !(detail::IsFull(map_->ctrl_at(idx_)) &&
                map_->bucket_index(map_->slot_at(idx_)->first) == bucket_))
         ++idx_;
     }
@@ -2093,10 +2095,13 @@ class flat_hash_map {
 
   size_type max_bucket_count() const noexcept { return kMaxCapacity; }
 
-  // Open addressing: a "bucket" holds at most one element.
+  // The elements with bucket(key) == n, as the standard defines it (the
+  // length of [begin(n), end(n))). Bucket n is not slot n: an element is
+  // stored near, not at, its bucket. Linear in the table size, like the
+  // local iterators.
   size_type bucket_size(size_type n) const {
     assert(n < cap_);
-    return detail::IsFull(ctrl_[n]) ? 1 : 0;
+    return static_cast<size_type>(std::distance(begin(n), end(n)));
   }
 
   size_type bucket(const key_type& key) const {
@@ -2114,12 +2119,14 @@ class flat_hash_map {
   const_local_iterator cbegin(size_type n) const {
     return const_local_iterator(this, n, 0);
   }
-  local_iterator end(size_type n) { return local_iterator(this, n, cap_); }
+  local_iterator end(size_type n) {
+    return local_iterator(this, n, cap_ + old_cap_);
+  }
   const_local_iterator end(size_type n) const {
-    return const_local_iterator(this, n, cap_);
+    return const_local_iterator(this, n, cap_ + old_cap_);
   }
   const_local_iterator cend(size_type n) const {
-    return const_local_iterator(this, n, cap_);
+    return const_local_iterator(this, n, cap_ + old_cap_);
   }
 
   // ---------------------------------------------------------------- observers

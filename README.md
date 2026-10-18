@@ -143,6 +143,25 @@ m.emplace(42, 100);
 auto it = m.find(42);  // it->second == 100
 ```
 
+For keys without values, `sflat::flat_hash_set` uses the same table and
+the same tuning, with an `std::unordered_set` interface. Each slot holds
+only the key, so a set of `uint64_t` needs about 10.6 bytes per entry
+instead of the map's 19.7:
+
+```cpp
+#include <sflat/flat_hash_set.hpp>
+
+sflat::flat_hash_set<uint64_t> s;
+s.reserve(1000000);
+s.insert(42);
+bool has = s.contains(42);  // true
+```
+
+Set elements cannot be changed in place (iterators give `const Key&`), and
+the map-only calls (`operator[]`, `at`, `try_emplace`, `insert_or_assign`)
+do not exist. The set offers only the `std::unordered_set` interface (no
+`find_batch()`).
+
 Compile with this command:
 
 `g++ -std=c++17 -O3 -march=native -I include your_file.cpp`
@@ -157,8 +176,12 @@ is fine too:
 ## File structure
 
 ```
-include/sflat/flat_hash_map.hpp   # the only header you need
-tests/correctness.cpp             # correctness tests
+include/sflat/flat_hash_map.hpp   # the map (the only header a map needs)
+include/sflat/flat_hash_set.hpp   # the set (includes flat_hash_map.hpp)
+tests/correctness.cpp             # correctness tests (map)
+tests/set_correctness.cpp         # correctness tests (set)
+tests/map_interface.cpp           # std::unordered_map interface tests (map)
+tests/set_interface.cpp           # std::unordered_set interface tests (set)
 tests/growth_tiers.cpp            # growth factor tests
 bench/bench.cpp                   # benchmark program
 BENCHMARK.md                      # benchmark results for all machines
