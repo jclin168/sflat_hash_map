@@ -453,7 +453,8 @@ also has the build and run steps.
 
 In short (`uint64_t -> uint64_t`, random keys, compared with emhash8,
 boost::unordered_flat_map, absl::flat_hash_map, the node-based maps, and on
-the Xeon also Google dense_hash_map and sparse_hash_map):
+the Xeon also Google dense_hash_map and sparse_hash_map, tsl::robin_map,
+ska::flat_hash_map and folly F14):
 
 - **Memory**: sflat uses the least memory in steady state on every machine
   (19.5 to 21.8 bytes/entry), except Google sparse_hash_map on the Xeon.
@@ -473,6 +474,11 @@ the Xeon also Google dense_hash_map and sparse_hash_map):
   boost_flat or absl_flat is faster: 1.1 to 1.3 times on the Xeon at 1M
   and 10M and on the i5-3230M.
 - **Iterate**: not a goal; emhash8 is much faster.
+- **Other maps with sizes that are not a power of two** (Xeon): tsl and ska
+  with the mod or prime policies are 13 to 19 percent slower on find hit at
+  100M than with a power of two, because they use `%`. They use 48 to 51
+  bytes/entry (max load 0.5), 2.4 to 2.6 times sflat. folly F14 uses the
+  same memory as boost_flat and is slower than sflat on find.
 
 ## Correctness tests
 
@@ -510,4 +516,5 @@ text. Each source file has an `SPDX-License-Identifier: Apache-2.0` line.
 
 The license covers `include/`, `tests/`, and `bench/`. `thirdparty/` holds
 the comparison maps for the benchmark. It is not in git, and each item
-keeps its original license (emhash, Boost, Abseil, sparsehash).
+keeps its original license (emhash, Boost, Abseil, sparsehash, tsl
+robin-map, ska flat_hash_map, folly, fmt).
