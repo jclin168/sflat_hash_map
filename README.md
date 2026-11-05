@@ -260,6 +260,21 @@ H2, and writes the new element into the first empty slot of the home group.
 All other cases (full home group, growth, migration) are in an out-of-line
 function, so an insert loop holds only the fast path.
 
+**erase.** A probe goes past a group only when the group is full. So a
+group that has an empty slot was never full since the last rebuild, and no
+key depends on it. `erase` makes the slot empty in such a group. In a group
+that was full, it leaves a tombstone. An insert whose home group has a
+tombstone and a clear overflow bit uses the tombstone at once.
+
+Tombstones are removed in place, as in abseil (`drop_tombstones()`). This
+occurs when tombstones and entries reach the load limit, or when the
+tombstones reach 1/32 of the slots (`SFLAT_TOMBSTONE_DIV`). Groups that were
+full keep their tombstones until a rebuild, so without the second limit,
+probes get longer while erases and inserts continue. The in-place rebuild
+allocates no memory. An earlier version allocated a new table each time. In
+the churn test below (erase one key, insert one new key, at a fixed size)
+at load 0.85, it did this every few thousand inserts.
+
 **Iteration** also scans a group at a time. A byte loop mispredicts on
 almost every slot when full and free slots are mixed (for example after
 many erases).
@@ -319,7 +334,7 @@ home group matched (`SFLAT_LAZY_OVERFLOW`): on Apple M2 this made random
 hits 8 to 13 percent faster.
 
 `erase` does not clear overflow bits. This is conservative and correct.
-A rehash or a migration rebuilds the bits.
+A rehash, a migration or an in-place tombstone removal rebuilds the bits.
 
 ### Capacity and growth
 
@@ -420,6 +435,7 @@ Define these before the include.
 | `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
 | `SFLAT_NO_AVX2` | 0 | 1: use SSE2 groups (16 bytes) in an AVX2 build. |
 | `SFLAT_OVERFLOW_BITS` | 32 | Bits per group in the overflow Bloom filter: 8, 16, 32 or 64. See "Overflow word". |
+| `SFLAT_TOMBSTONE_DIV` | 32 | Tombstones in 1/N of the slots start an in-place rebuild below the load limit. See "erase". |
 | `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
 | `SFLAT_LAZY_OVERFLOW` | 1 with NEON, else 0 | 1: `find()` reads the overflow word only when no key in the home group matched. |
 | `SFLAT_FIND_NEXT_INLINE` | 1 with NEON, else 0 | 1: the probe of the group after the home group is inlined in `find()`. |
@@ -453,8 +469,9 @@ Limits (common trade-offs of open addressing):
   `std::unordered_map` guarantees that `insert` does not invalidate
   iterators. This map does not give that guarantee.
 - `erase` never moves other items. `it = m.erase(it)` loops are safe, also
-  during a migration. `erase` leaves a tombstone; after many erases, call
-  `rehash` or `optimize()`.
+  during a migration. Tombstones are removed in place during later inserts.
+  When no more inserts will occur, `optimize()` removes them and shrinks the
+  table.
 - `const` functions never change the map, also during a migration. Many
   threads can read at the same time while no thread writes.
 - Bucket and local iterators do not have full standard semantics.

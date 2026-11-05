@@ -621,6 +621,52 @@ void test_self_aliasing() {
   std::printf("test_self_aliasing OK\n");
 }
 
+// Erase one key and insert a new one, many times, at a fixed size: the
+// "churn" workload. Erase frees a slot or leaves a tombstone, and the
+// tombstones are removed in place, so the table must not grow, and every
+// key must stay findable. Sizes cover low and high load factors (the top of
+// the sawtooth, just below a growth step) and small and large tables;
+// std::string values exercise the moves of the in-place rebuild.
+void test_churn_fixed_size() {
+  std::mt19937_64 rng(2026);
+  for (size_t n : {30u, 900u, 1500u, 1790u, 3000u, 14000u, 28600u, 57000u}) {
+    sflat::flat_hash_map<uint64_t, std::string> m;
+    std::unordered_map<uint64_t, std::string> ref;
+    std::vector<uint64_t> live;
+    while (live.size() < n) {
+      const uint64_t k = rng() >> 1;
+      if (ref.emplace(k, std::to_string(k)).second) {
+        m.emplace(k, std::to_string(k));
+        live.push_back(k);
+      }
+    }
+    const size_t buckets = m.bucket_count();
+    for (size_t i = 0; i < 20 * n + 20000; ++i) {
+      const size_t at = rng() % live.size();
+      CHECK(m.erase(live[at]) == 1);
+      ref.erase(live[at]);
+      uint64_t k;
+      do {
+        k = rng() >> 1;
+      } while (ref.count(k));
+      const std::string v = std::string(40, 'x') + std::to_string(k);
+      CHECK(m.try_emplace(k, v).second);
+      ref.emplace(k, v);
+      live[at] = k;
+      if (i % 97 == 0) {  // a hit and a miss
+        const uint64_t h = live[rng() % live.size()];
+        auto it = m.find(h);
+        CHECK(it != m.end() && it->second == ref[h]);
+        CHECK(m.find(rng() | (1ull << 63)) == m.end());
+      }
+    }
+    CHECK(m.bucket_count() == buckets);
+    CHECK(maps_equal(m, ref));
+    for (uint64_t k : live) CHECK(m.count(k) == 1);
+  }
+  std::printf("test_churn_fixed_size OK\n");
+}
+
 int main() {
   test_group_match();
   test_api_surface();
@@ -633,6 +679,7 @@ int main() {
   test_self_aliasing();
   test_large_mixed();
   test_custom_allocator();
+  test_churn_fixed_size();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
   return 0;
 }
