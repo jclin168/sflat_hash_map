@@ -928,14 +928,16 @@ class flat_hash_set {
       }
       value_type* e = cur_slot(dst);
       construct(static_cast<void*>(e));
-      if (ctrl_[dst] == detail::kDeleted) {
-        --deleted_;  // size_ + deleted_ is unchanged: growth_left_ stays
-      } else {
-        --growth_left_;
-      }
+      const bool reused = ctrl_[dst] == detail::kDeleted;
       ctrl_[dst] = detail::H2(h);
       if (dst / kWidth != home) overflow_[home] |= bit;
       ++size_;
+      if (reused) {
+        --deleted_;
+        reset_growth_left();
+      } else {
+        --growth_left_;
+      }
       return {iterator(this, e), true};
     }
     return insert_with_growth(key, h, construct);
@@ -1040,11 +1042,21 @@ class flat_hash_set {
   // Inserts left before the slow path must run (0 while migrating).
   void reset_growth_left() noexcept {
     const size_t used = size_ + deleted_;
-    growth_left_ =
-        (old_cap_ == 0 && used < limit_ && deleted_ < tombstone_limit())
-            ? limit_ - used
-            : 0;
+    const size_t hard = used_limit();
+    if (old_cap_ != 0 || size_ >= limit_ || used >= hard ||
+        deleted_ >= tombstone_limit()) {
+      growth_left_ = 0;
+    } else {
+      growth_left_ = limit_ - size_ < hard - used ? limit_ - size_ : hard - used;
+    }
   }
+
+  // Slots that entries and tombstones together may fill before an in-place
+  // rebuild: the load limit plus a quarter of the slots above it (0.906 at
+  // the default 0.875). Entries alone grow the table at the load limit. Were
+  // tombstones held to the load limit too, a table just below it would
+  // rebuild every few erases.
+  size_t used_limit() const noexcept { return limit_ + (cap_ - limit_) / 4; }
 
   // Tombstones that start an in-place rebuild even below the load limit.
   // They sit in groups that were probed past, and those groups do not get
@@ -1231,7 +1243,7 @@ class flat_hash_set {
     if (size_ + 1 > limit_) {
       begin_migration(grown_cap(min_cap_for(size_ + 1)));
       migrate_step();
-    } else if (size_ + deleted_ + 1 > limit_ ||
+    } else if (size_ + deleted_ + 1 > used_limit() ||
                deleted_ >= tombstone_limit()) {
       drop_tombstones();  // recycle tombstones without growing
     }
