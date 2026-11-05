@@ -70,11 +70,20 @@ cmake --build abseil-build -j && cmake --install abseil-build
 git clone https://github.com/sparsehash/sparsehash sparsehash-src
 git -C sparsehash-src checkout sparsehash-2.0.4
 (cd sparsehash-src && ./configure --prefix=$PWD/../sparsehash && make install-data)
+# tsl::robin_map and ska::flat_hash_map (optional, header only)
+git clone https://github.com/Tessil/robin-map tsl-robin-map && git -C tsl-robin-map checkout 91362aa
+git clone https://github.com/skarupke/flat_hash_map ska && git -C ska checkout 2c46874
+# folly F14 (optional): only the sources and fmt, no folly build or install
+git clone https://github.com/facebook/folly folly-src && git -C folly-src checkout 25c4599
+git clone --branch 11.1.4 https://github.com/fmtlib/fmt fmt
 cd ..
 ```
 
 Build and run (CMake adds `-O3 -march=native -DNDEBUG`, `-DHAS_ABSL` when
-it finds Abseil, and `-DHAS_SPARSEHASH` when it finds sparsehash):
+it finds Abseil, `-DHAS_SPARSEHASH` when it finds sparsehash, `-DHAS_TSL`
+and `-DHAS_SKA` when it finds them, and `-DHAS_FOLLY` when it finds the
+folly sources and fmt. Current folly needs C++20, so with folly the bench
+is built as C++20):
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -252,6 +261,114 @@ slow. To turn THP off, define `SFLAT_USE_THP=0`.
 - **erase and iterate**: not a goal. Erase is the fastest at 10M and within
   1.35x of the best at the other sizes. Iterate is faster than boost_flat
   at all sizes.
+
+### Other open-addressing maps: tsl, ska and folly
+
+A separate run (3 runs per size, median) with the maps that can use a table
+size that is not a power of two. boost_flat and absl_flat are in the table
+for reference.
+
+- tsl::robin_map (commit 91362aa, robin hood hashing, default max load 0.5,
+  `std::hash`), with its three growth policies:
+  - `tsl_robin`: power of two (default), position by a mask
+  - `tsl_mod`: any size, 1.5x growth, position by `%`
+  - `tsl_prime`: sizes from a table of primes, `%` by a constant
+- ska::flat_hash_map (commit 2c46874, robin hood hashing, default max load
+  0.5, `std::hash`):
+  - `ska_flat`: Fibonacci hashing on a power of two (default)
+  - `ska_prime`: `prime_number_hash_policy`, prime sizes
+- folly::F14ValueMap (`folly_f14`, commit 25c4599, default hasher): SIMD
+  chunks of 14 slots. The chunk count is a power of two, but the capacity
+  can be less than the full chunks.
+- This run uses a C++20 build of the bench (folly needs C++20); the other
+  tables above use C++17. Compare the maps in the same table, not with the
+  tables above. The sflat numbers are different from the tables above (for
+  example insert at 100M: 48.3 here, 42.7 there). This is in the range of
+  the run-to-run noise of this machine.
+
+Table size after `n` inserts with no reserve (`bucket_count()`) at 100M:
+
+| sflat | boost_flat | absl_flat | tsl_robin | tsl_mod | tsl_prime | ska_flat | ska_prime | folly_f14 |
+|---|---|---|---|---|---|---|---|---|
+| 134,217,728 | 125,829,119 | 134,217,727 | 268,435,456 | 204,324,849 | 201,326,611 | 268,435,456 | 210,719,881 | 100,663,296 |
+
+**n = 1,000,000**
+
+| Operation | sflat | boost_flat | absl_flat | tsl_robin | tsl_mod | tsl_prime | ska_flat | ska_prime | folly_f14 |
+|---|---|---|---|---|---|---|---|---|---|
+| insert (reserved) | **24.2** | 30.1 | 45.3 | 45.7 | 51.4 | 60.9 | 56.1 | 61.3 | 34.9 |
+| find hit (insert order) | **11.6** | 12.3 | 19.7 | 15.3 | 19.6 | 21.1 | 16.4 | 20.9 | 14.4 |
+| find hit (random order) | 12.4 | **11.3** | 20.7 | 15.3 | 19.1 | 18.5 | 14.8 | 17.1 | 15.0 |
+| find miss | 7.3 | **5.8** | 7.5 | 19.5 | 25.9 | 18.4 | 18.9 | 27.3 | 11.7 |
+| erase | **15.4** | 15.9 | 25.8 | 23.8 | 28.0 | 26.9 | 22.7 | 25.1 | 22.1 |
+| iterate | 8.8 | 10.7 | **8.0** | 16.3 | 15.0 | 22.3 | 15.3 | 14.8 | 11.8 |
+| insert (no reserve) | 63.7 | **55.7** | 65.7 | 82.3 | 145.6 | 165.2 | 97.7 | 188.9 | 63.9 |
+| bytes/entry (steady) | **20.8** | 34.1 | 36.2 | 50.9 | 48.6 | 76.1 | 50.9 | 50.4 | 34.1 |
+| bytes/entry (growth peak) | **39.9** | 50.5 | 53.6 | 75.8 | 94.7 | 113.5 | 75.8 | 118.7 | 50.5 |
+
+**n = 10,000,000**
+
+| Operation | sflat | boost_flat | absl_flat | tsl_robin | tsl_mod | tsl_prime | ska_flat | ska_prime | folly_f14 |
+|---|---|---|---|---|---|---|---|---|---|
+| insert (reserved) | **34.5** | 39.6 | 51.0 | 220.1 | 207.1 | 102.5 | 145.0 | 79.6 | 52.6 |
+| find hit (insert order) | **23.3** | 29.0 | 33.1 | 29.5 | 32.1 | 34.5 | 25.0 | 41.4 | 41.4 |
+| find hit (random order) | 31.9 | 27.5 | 33.7 | 26.4 | 32.7 | 33.1 | **26.3** | 36.2 | 43.0 |
+| find miss | 16.0 | **11.6** | 14.3 | 26.0 | 39.5 | 34.1 | 27.6 | 47.7 | 33.4 |
+| erase | 32.4 | 36.0 | 50.9 | 33.6 | 51.3 | 45.9 | **31.5** | 47.0 | 45.9 |
+| iterate | 8.9 | 11.4 | **8.8** | 26.7 | 18.6 | 21.8 | 22.9 | 17.7 | 13.0 |
+| insert (no reserve) | 160.3 | 155.4 | 87.1 | 383.7 | 324.7 | 165.7 | 212.4 | 213.1 | **71.9** |
+| bytes/entry (steady) | **19.9** | 26.9 | 28.6 | 80.6 | 48.1 | 60.5 | 80.6 | 50.2 | 26.9 |
+| bytes/entry (growth peak) | **30.0** | 40.3 | 42.8 | 120.8 | 107.7 | 90.6 | 120.8 | 94.9 | 40.4 |
+
+**n = 100,000,000**
+
+| Operation | sflat | boost_flat | absl_flat | tsl_robin | tsl_mod | tsl_prime | ska_flat | ska_prime | folly_f14 |
+|---|---|---|---|---|---|---|---|---|---|
+| insert (reserved) | **48.3** | 99.2 | 80.8 | 286.3 | 70.8 | 129.2 | 192.3 | 88.5 | 70.6 |
+| find hit (insert order) | 39.2 | 44.1 | 48.6 | 35.2 | 41.0 | 41.8 | **34.4** | 40.8 | 54.0 |
+| find hit (random order) | 43.7 | 44.0 | 52.3 | **34.9** | 39.5 | 41.7 | 35.4 | 41.2 | 56.6 |
+| find miss | 29.4 | **23.2** | 33.1 | 37.0 | 46.9 | 44.1 | 37.0 | 54.0 | 69.3 |
+| erase | 55.2 | 53.6 | 74.9 | 44.9 | 55.7 | 58.9 | **39.9** | 50.3 | 66.5 |
+| iterate | 8.8 | 12.6 | **8.6** | 23.0 | 18.4 | 19.2 | 20.4 | 18.1 | 12.4 |
+| insert (no reserve) | **91.6** | 150.2 | 154.5 | 466.6 | 309.3 | 261.0 | 397.8 | 292.5 | 119.4 |
+| bytes/entry (steady) | **19.6** | 21.5 | 22.8 | 64.4 | 48.0 | 48.3 | 64.4 | 50.6 | 21.5 |
+| bytes/entry (growth peak) | **23.8** | 32.2 | 34.2 | 96.6 | 81.7 | 72.5 | 96.6 | 75.9 | 32.3 |
+
+The sflat inserts vary a lot between runs: reserved insert 18.8 to 112.6
+ns at 1M, 26.6 to 40.4 at 10M and 45.4 to 58.8 at 100M; no-reserve insert
+52.3 to 119.6 ns at 1M and 58.6 to 161.8 at 10M. The sflat find rows vary
+by up to 38 percent at 1M, up to 11 percent at 10M and up to 17 percent at
+100M.
+
+What this shows:
+
+- **A size that is not a power of two costs time in tsl and ska.** They
+  compute the position with `%`. At 100M, find hit (random order) is 13
+  percent slower with `tsl_mod` and 19 percent slower with `tsl_prime` than
+  with `tsl_robin`, and 16 percent slower with `ska_prime` than with
+  `ska_flat`. Find miss is 19 to 46 percent slower. sflat uses fastrange
+  (one multiply), so its position cost does not depend on the size.
+- **The non-power-of-two policies save memory, but the 0.5 max load keeps
+  it high.** At 100M `tsl_mod` and `tsl_prime` use 48 bytes/entry against
+  64.4 for `tsl_robin`. This is still 2.4 to 2.5 times sflat (19.6). Their
+  growth peak is 72.5 and 81.7 bytes/entry against 23.8 for sflat.
+- **The half-empty tables give the fastest find hit at 10M and 100M.**
+  `tsl_robin` and `ska_flat` are 20 percent faster than sflat at 100M
+  (34.9 and 35.4 against 43.7 ns), at 3.3 times the memory.
+- **Insert with reserve is slow when the table is large.** At 100M
+  `tsl_robin` and `ska_flat` reserve 2^28 buckets (6.4 GB) and pay the
+  first touch of all of it: 286.3 and 192.3 ns. The smaller tables of
+  `tsl_mod` and `ska_prime` take 70.8 and 88.5 ns. sflat is the fastest
+  (48.3).
+- **folly F14** uses the same memory as boost_flat (21.5 bytes/entry at
+  100M). Its table size is not a power of two (100,663,296 at 100M: 2^23
+  chunks of 12 entries). Its no-reserve insert is the fastest at 10M (71.9
+  ns) and second to sflat at 100M (119.4 against 91.6). Its find hit and
+  find miss are the slowest of the SIMD maps here at 10M and 100M (find
+  miss 69.3 ns at 100M).
+- sflat has the lowest memory, steady and peak, at all sizes in this table,
+  and the fastest reserved insert. At 100M it also has the fastest
+  no-reserve insert.
 
 ## Intel Celeron N5105
 
