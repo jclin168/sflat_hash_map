@@ -686,9 +686,10 @@ class flat_hash_set {
       if (ovf == 0) return nullptr;
 #if SFLAT_FIND_NEXT_INLINE
       // Keys that spill from the home group take the first group after it
-      // with an empty slot. A slot never becomes empty again (erase leaves a
-      // tombstone) until a rehash or migration rebuilds the table, so an
-      // empty slot in the next group proves that the key is not further on.
+      // with an empty slot. A group that was full does not get an empty slot
+      // again (erase leaves a tombstone there, see mark_erased()) until a
+      // rebuild, so an empty slot in the next group proves that the key is
+      // not further on.
       size_t nb = base + kWidth;
       if (nb == cap_) nb = 0;
       const Group g2 = Group::Load(ctrl_ + nb);
@@ -709,10 +710,11 @@ class flat_hash_set {
 
   // The probe past the home group when SFLAT_FIND_NEXT_INLINE is 0: a key
   // whose home group overflowed. Keys that spill from the home group take
-  // the first group after it with an empty slot. A slot never becomes empty
-  // again (erase leaves a tombstone) until a rehash or migration rebuilds the
-  // table, so the first empty slot after the home group proves that the key
-  // is not further on. Not migrating (old_cap_ == 0).
+  // the first group after it with an empty slot. A group that was full does
+  // not get an empty slot again (erase leaves a tombstone there, see
+  // mark_erased()) until a rebuild, so the first empty slot after the home
+  // group proves that the key is not further on. Not migrating (old_cap_ ==
+  // 0).
   // It probes on from the next group itself instead of handing over to
   // find_ptr_slow(), which would start again at the home group: full groups
   // come in runs, so the next group often has no empty slot (41 percent of
@@ -878,52 +880,67 @@ class flat_hash_set {
   SFLAT_NOINLINE std::pair<iterator, bool> insert_with_slow(
       const key_type& key, uint64_t h, Construct&& construct) {
     if (growth_left_ != 0) {
-      if (deleted_ == 0) {
-        // No tombstones, so the key goes to the first empty slot after the
-        // home group. (With tombstones, find_or_prepare() below reuses the
-        // first one.) growth_left_ != 0 means there is no migration and at
-        // least one empty slot, so the loop ends. If the home group's
-        // overflow bit is clear, no key with this bit spilled from it, so
-        // the later groups cannot hold the key and only empty slots matter.
-        const size_t home = detail::HomeSlot(h, cap_) / kWidth;
-        const size_t ng = cap_ / kWidth;
-        const detail::Overflow bit = detail::OverflowBit(h);
-        const bool may_spill = (overflow_[home] & bit) != 0;
+      // No migration, and at least one empty slot, so the loop below ends.
+      // insert_with() found that the home group neither holds the key nor
+      // has an empty slot. The key goes to the first free slot (a tombstone
+      // or an empty slot) from the home group on. If the home group's
+      // overflow bit is clear, no key with this bit spilled from it, so the
+      // later groups cannot hold the key and the first free slot ends the
+      // search. Otherwise look for the key up to the first group with an
+      // empty slot, as find does. Taking a tombstone in the home group at
+      // once matters when erases and inserts alternate at a fixed size: the
+      // groups that once were full keep their tombstones, and without the
+      // overflow bit each insert into one would probe on to the next group
+      // with an empty slot.
+      const size_t home = detail::HomeSlot(h, cap_) / kWidth;
+      const size_t ng = cap_ / kWidth;
+      const detail::Overflow bit = detail::OverflowBit(h);
+      const bool may_spill = (overflow_[home] & bit) != 0;
+      size_t dst = cap_;  // first free slot
+      if (deleted_ != 0) {
+        const Mask md = Group::Load(ctrl_ + home * kWidth).Match(detail::kDeleted);
+        if (md) dst = home * kWidth + Group::Lane(md);
+      }
+      if (dst == cap_ || may_spill) {
         size_t gi = home;
         for (;;) {
           if (++gi == ng) gi = 0;
           const Group g = Group::Load(ctrl_ + gi * kWidth);
           if (may_spill) {
             Mask m = g.MatchH2(h);
-            while(m) {
+            while (m) {
               value_type* e = cur_slot(gi * kWidth + Group::Lane(m));
               if (equal_(*e, key)) return {iterator(this, e), false};
               m &= m - 1;
             }
           }
           const Mask me = g.Match(detail::kEmpty);
-          if (me) {
-            const size_t idx = gi * kWidth + Group::Lane(me);
-            value_type* e = cur_slot(idx);
-            construct(static_cast<void*>(e));
-            ctrl_[idx] = detail::H2(h);
-            overflow_[home] |= bit;
-            ++size_;
-            --growth_left_;
-            return {iterator(this, e), true};
+          if (dst == cap_) {
+            if (me) {
+              dst = gi * kWidth + Group::Lane(me);
+            } else if (deleted_ != 0) {
+              const Mask md = g.Match(detail::kDeleted);
+              if (md) dst = gi * kWidth + Group::Lane(md);
+            }
           }
+          if (me || (!may_spill && dst != cap_)) break;
         }
       }
-    } else {
-      return insert_with_growth(key, h, construct);
+      value_type* e = cur_slot(dst);
+      construct(static_cast<void*>(e));
+      const bool reused = ctrl_[dst] == detail::kDeleted;
+      ctrl_[dst] = detail::H2(h);
+      if (dst / kWidth != home) overflow_[home] |= bit;
+      ++size_;
+      if (reused) {
+        --deleted_;
+        reset_growth_left();
+      } else {
+        --growth_left_;
+      }
+      return {iterator(this, e), true};
     }
-    const Probe p = locate_for_insert(key, h);
-    if (!p.found) {
-      construct(static_cast<void*>(slot_at(p.idx)));
-      commit_insert(p.idx, h);
-      reset_growth_left();
-    }
-    return {iterator(this, slot_at(p.idx)), !p.found};
+    return insert_with_growth(key, h, construct);
   }
 
   // Insert that first grows, migrates or rehashes the table. That moves
@@ -1025,7 +1042,28 @@ class flat_hash_set {
   // Inserts left before the slow path must run (0 while migrating).
   void reset_growth_left() noexcept {
     const size_t used = size_ + deleted_;
-    growth_left_ = (old_cap_ == 0 && used < limit_) ? limit_ - used : 0;
+    const size_t hard = used_limit();
+    if (old_cap_ != 0 || size_ >= limit_ || used >= hard ||
+        deleted_ >= tombstone_limit()) {
+      growth_left_ = 0;
+    } else {
+      growth_left_ = limit_ - size_ < hard - used ? limit_ - size_ : hard - used;
+    }
+  }
+
+  // Slots that entries and tombstones together may fill before an in-place
+  // rebuild: the load limit plus a quarter of the slots above it (0.906 at
+  // the default 0.875). Entries alone grow the table at the load limit. Were
+  // tombstones held to the load limit too, a table just below it would
+  // rebuild every few erases.
+  size_t used_limit() const noexcept { return limit_ + (cap_ - limit_) / 4; }
+
+  // Tombstones that start an in-place rebuild even below the load limit.
+  // They sit in groups that were probed past, and those groups do not get
+  // an empty slot again until a rebuild, so probes through them get longer
+  // the longer erases and inserts go on.
+  size_t tombstone_limit() const noexcept {
+    return cap_ / SFLAT_TOMBSTONE_DIV + 1;
   }
 
   bool is_migrating() const noexcept { return old_cap_ != 0; }
@@ -1205,8 +1243,96 @@ class flat_hash_set {
     if (size_ + 1 > limit_) {
       begin_migration(grown_cap(min_cap_for(size_ + 1)));
       migrate_step();
-    } else if (size_ + deleted_ + 1 > limit_) {
-      rehash_to(cap_);  // recycle tombstones without growing
+    } else if (size_ + deleted_ + 1 > used_limit() ||
+               deleted_ >= tombstone_limit()) {
+      drop_tombstones();  // recycle tombstones without growing
+    }
+  }
+
+  // Rebuild the table at the same size and in place, to remove the
+  // tombstones (as abseil's DropDeletesWithoutResize). rehash_to(cap_) would
+  // allocate and touch a whole new table each time, and when erases and
+  // inserts alternate near the maximum load this runs every few thousand
+  // inserts. First the tombstones become empty and the elements become
+  // unplaced (marked kDeleted), and the overflow words are cleared. Then
+  // each unplaced element goes to the first slot that is not placed, in
+  // probe order from its home group: it stays if that slot is in its own
+  // group, it moves to an empty slot, or it swaps with another unplaced
+  // element and that one is placed next. The groups that an element skips
+  // were all placed and full, as a find expects. Not migrating.
+  void drop_tombstones() {
+    assert(!is_migrating());
+    const size_t ng = cap_ / kWidth;
+    // Full -> kDeleted, else kEmpty, 8 bytes at a time (cap_ is a multiple
+    // of 8): z has a zero byte where the byte is kEmpty or kDeleted.
+    static_assert(detail::kEmpty == 0xFF && detail::kDeleted == 0xFE, "");
+    constexpr uint64_t kLo = 0x0101010101010101ULL;
+    constexpr uint64_t k7F = 0x7F7F7F7F7F7F7F7FULL;
+    for (size_t i = 0; i < cap_; i += 8) {
+      uint64_t x;
+      std::memcpy(&x, ctrl_ + i, 8);
+      const uint64_t z = ~(x | kLo);
+      const uint64_t full = (((z & k7F) + k7F) | z) & ~k7F;  // 0x80: full
+      x = ~uint64_t{0} ^ (full >> 7);
+      std::memcpy(ctrl_ + i, &x, 8);
+    }
+    std::memset(overflow_, 0, ng * sizeof(detail::Overflow));
+    // Group by group with a mask, not slot by slot: whether a slot is full is
+    // random, and a branch on it would mostly mispredict. An element moves
+    // only to a later group, or wraps to a group already done, so the mask
+    // of the current group stays valid.
+    for (size_t g0 = 0; g0 < cap_; g0 += kWidth) {
+      for (Mask un = Group::Load(ctrl_ + g0).Match(detail::kDeleted); un;
+           un &= un - 1)
+        place_unplaced(g0 + Group::Lane(un), ng);
+    }
+    deleted_ = 0;
+    reset_growth_left();
+  }
+
+  // Place the unplaced element in slot i (drop_tombstones()). A swap puts
+  // another unplaced element into slot i, which the loop then places.
+  void place_unplaced(size_t i, size_t ng) {
+    alignas(value_type) unsigned char buf[sizeof(value_type)];
+    value_type* const tmp = reinterpret_cast<value_type*>(buf);
+    while (ctrl_[i] == detail::kDeleted) {
+      value_type* const s = slot_at(i);
+      const uint64_t h = hash_mixed(*s);
+      const size_t home = detail::Fastrange(h, ng);
+      if (home == i / kWidth) {  // most elements: in the home group
+        ctrl_[i] = detail::H2(h);
+        return;
+      }
+      size_t gi = home;
+      Mask free = 0;
+      for (;;) {
+        const Group g = Group::Load(ctrl_ + gi * kWidth);
+        free = g.Match(detail::kEmpty) | g.Match(detail::kDeleted);
+        if (free) break;
+        if (++gi == ng) gi = 0;
+      }
+      if (gi != home) overflow_[home] |= detail::OverflowBit(h);
+      if (gi == i / kWidth) {
+        ctrl_[i] = detail::H2(h);
+        return;
+      }
+      const size_t dst = gi * kWidth + Group::Lane(free);
+      value_type* const d = slot_at(dst);
+      if (ctrl_[dst] == detail::kEmpty) {
+        ::new (static_cast<void*>(d)) value_type(std::move(*s));
+        destroy_slot(i);
+        ctrl_[dst] = detail::H2(h);
+        ctrl_[i] = detail::kEmpty;
+        return;
+      }
+      // dst holds an unplaced element: swap.
+      ::new (static_cast<void*>(tmp)) value_type(std::move(*d));
+      destroy_slot(dst);
+      ::new (static_cast<void*>(d)) value_type(std::move(*s));
+      destroy_slot(i);
+      ::new (static_cast<void*>(s)) value_type(std::move(*tmp));
+      tmp->~value_type();
+      ctrl_[dst] = detail::H2(h);
     }
   }
 
@@ -1305,6 +1431,30 @@ class flat_hash_set {
     }
   }
 
+  // Free slot i of an erased element (already destroyed). The slot goes
+  // back to empty when its group still has an empty slot. An insert probes
+  // past a group only when the group is full, and a full group gets only
+  // tombstones (below), so a group with an empty slot was not full since the
+  // last rebuild: no insert probed past it, and no find needs it to stay
+  // without an empty slot. Otherwise the slot becomes a tombstone. This
+  // keeps erase + insert at a fixed size from filling the table with
+  // tombstones. The old table of a migration always gets a tombstone (the
+  // migration skips it).
+  void mark_erased(size_t i) noexcept {
+    --size_;
+    if (i >= cap_) {
+      old_ctrl_[i - cap_] = detail::kDeleted;
+      return;
+    }
+    if (Group::Load(ctrl_ + i / kWidth * kWidth).Match(detail::kEmpty)) {
+      ctrl_[i] = detail::kEmpty;
+      reset_growth_left();
+    } else {
+      ctrl_[i] = detail::kDeleted;
+      if (++deleted_ >= tombstone_limit()) growth_left_ = 0;
+    }
+  }
+
   // --------------------------------------------------------------- modifiers
  public:
   void clear() noexcept {
@@ -1378,13 +1528,7 @@ class flat_hash_set {
     const size_t i = pos.index();
     assert(i < cap_ + old_cap_ && detail::IsFull(ctrl_at(i)));
     destroy_slot(i);
-    if (i < cap_) {
-      ctrl_[i] = detail::kDeleted;
-      ++deleted_;
-    } else {
-      old_ctrl_[i - cap_] = detail::kDeleted;  // the migration skips it
-    }
-    --size_;
+    mark_erased(i);
     return iterator(this, first_full_from(i + 1));
   }
 
@@ -1404,13 +1548,7 @@ class flat_hash_set {
     if (!e) return 0;
     const size_t i = index_of(e);
     destroy_slot(i);
-    if (i < cap_) {
-      ctrl_[i] = detail::kDeleted;
-      ++deleted_;
-    } else {
-      old_ctrl_[i - cap_] = detail::kDeleted;  // the migration skips it
-    }
-    --size_;
+    mark_erased(i);
     return 1;
   }
 

@@ -360,6 +360,46 @@ void test_memory_per_slot() {
   std::printf("test_memory_per_slot OK (%.1f bytes/entry)\n", bytes);
 }
 
+// Erase one key and insert a new one, many times, at a fixed size (see
+// test_churn_fixed_size in tests/correctness.cpp). std::string keys longer
+// than the SSO buffer exercise the moves of the in-place rebuild.
+void test_churn_fixed_size() {
+  std::mt19937_64 rng(2026);
+  for (size_t n : {30u, 900u, 1500u, 1790u, 3000u, 14000u, 28600u}) {
+    sflat::flat_hash_set<std::string> s;
+    std::unordered_set<std::string> ref;
+    std::vector<std::string> live;
+    auto key = [&] { return std::string(30, 'k') + std::to_string(rng()); };
+    while (live.size() < n) {
+      std::string k = key();
+      if (ref.insert(k).second) {
+        s.insert(k);
+        live.push_back(k);
+      }
+    }
+    const size_t buckets = s.bucket_count();
+    for (size_t i = 0; i < 20 * n + 20000; ++i) {
+      const size_t at = rng() % live.size();
+      CHECK(s.erase(live[at]) == 1);
+      ref.erase(live[at]);
+      std::string k;
+      do {
+        k = key();
+      } while (ref.count(k));
+      CHECK(s.insert(k).second);
+      ref.insert(k);
+      live[at] = k;
+      if (i % 97 == 0) {
+        CHECK(s.count(live[rng() % live.size()]) == 1);
+        CHECK(s.count("absent" + std::to_string(rng())) == 0);
+      }
+    }
+    CHECK(s.bucket_count() == buckets);
+    CHECK(sets_equal(s, ref));
+  }
+  std::printf("test_churn_fixed_size OK\n");
+}
+
 int main() {
   test_api_surface();
   test_random_ops();
@@ -369,6 +409,7 @@ int main() {
   test_custom_allocator();
   test_self_aliasing();
   test_memory_per_slot();
+  test_churn_fixed_size();
   std::printf("ALL SET TESTS PASSED\n");
   return 0;
 }

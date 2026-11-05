@@ -184,6 +184,7 @@ tests/map_interface.cpp           # std::unordered_map interface tests (map)
 tests/set_interface.cpp           # std::unordered_set interface tests (set)
 tests/growth_tiers.cpp            # growth factor tests
 bench/bench.cpp                   # benchmark program
+bench/churn.cpp                   # octave churn benchmark (erase + insert)
 BENCHMARK.md                      # benchmark results for all machines
 thirdparty/                       # comparison maps for the benchmark (not in git)
 ```
@@ -260,6 +261,29 @@ H2, and writes the new element into the first empty slot of the home group.
 All other cases (full home group, growth, migration) are in an out-of-line
 function, so an insert loop holds only the fast path.
 
+**erase.** A probe goes past a group only when the group is full. So a
+group that has an empty slot was never full since the last rebuild, and no
+key depends on it. `erase` makes the slot empty in such a group. In a group
+that was full, it leaves a tombstone. An insert whose home group has a
+tombstone and a clear overflow bit uses the tombstone at once.
+
+Tombstones are removed in place, as in abseil (`drop_tombstones()`). The
+in-place rebuild allocates no memory. It runs in two cases:
+
+- Entries and tombstones together reach the load limit plus a quarter of
+  the slots above it (0.906 at the default 0.875). The table still grows
+  when the entries alone reach the load limit.
+- The tombstones reach 1/32 of the slots (`SFLAT_TOMBSTONE_DIV`). Groups
+  that were full keep their tombstones until a rebuild, so without this
+  limit, probes get longer while erases and inserts continue.
+
+In the churn benchmark (erase one key and insert one new key, at a fixed
+size; see BENCHMARK.md, "Churn") this made sflat 2.3x to 2.7x faster for
+tables up to 64K entries. It is now 1.10x to 1.15x behind
+boost::unordered_flat_map and faster than absl::flat_hash_map. The old
+code left a tombstone on every erase and rebuilt into a new table, at
+load 0.874 every few erases.
+
 **Iteration** also scans a group at a time. A byte loop mispredicts on
 almost every slot when full and free slots are mixed (for example after
 many erases).
@@ -319,7 +343,7 @@ home group matched (`SFLAT_LAZY_OVERFLOW`): on Apple M2 this made random
 hits 8 to 13 percent faster.
 
 `erase` does not clear overflow bits. This is conservative and correct.
-A rehash or a migration rebuilds the bits.
+A rehash, a migration or an in-place tombstone removal rebuilds the bits.
 
 ### Capacity and growth
 
@@ -420,6 +444,7 @@ Define these before the include.
 | `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
 | `SFLAT_NO_AVX2` | 0 | 1: use SSE2 groups (16 bytes) in an AVX2 build. |
 | `SFLAT_OVERFLOW_BITS` | 32 | Bits per group in the overflow Bloom filter: 8, 16, 32 or 64. See "Overflow word". |
+| `SFLAT_TOMBSTONE_DIV` | 32 | Tombstones in 1/N of the slots start an in-place rebuild below the load limit. See "erase". |
 | `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
 | `SFLAT_LAZY_OVERFLOW` | 1 with NEON, else 0 | 1: `find()` reads the overflow word only when no key in the home group matched. |
 | `SFLAT_FIND_NEXT_INLINE` | 1 with NEON, else 0 | 1: the probe of the group after the home group is inlined in `find()`. |
@@ -453,8 +478,9 @@ Limits (common trade-offs of open addressing):
   `std::unordered_map` guarantees that `insert` does not invalidate
   iterators. This map does not give that guarantee.
 - `erase` never moves other items. `it = m.erase(it)` loops are safe, also
-  during a migration. `erase` leaves a tombstone; after many erases, call
-  `rehash` or `optimize()`.
+  during a migration. Tombstones are removed in place during later inserts.
+  When no more inserts will occur, `optimize()` removes them and shrinks the
+  table.
 - `const` functions never change the map, also during a migration. Many
   threads can read at the same time while no thread writes.
 - Bucket and local iterators do not have full standard semantics.
@@ -476,7 +502,8 @@ also has the build and run steps.
 
 In short (`uint64_t -> uint64_t`, random keys, compared with emhash8,
 boost::unordered_flat_map, absl::flat_hash_map, the node-based maps, and on
-the Xeon also Google dense_hash_map and sparse_hash_map):
+the Xeon also Google dense_hash_map and sparse_hash_map, tsl::robin_map,
+ska::flat_hash_map and folly F14):
 
 - **Memory**: sflat uses the least memory in steady state on every machine
   (19.5 to 21.8 bytes/entry), except Google sparse_hash_map on the Xeon.
@@ -496,6 +523,14 @@ the Xeon also Google dense_hash_map and sparse_hash_map):
   boost_flat or absl_flat is faster: 1.1 to 1.3 times on the Xeon at 1M
   and 10M and on the i5-3230M.
 - **Iterate**: not a goal; emhash8 is much faster.
+- **Other maps with sizes that are not a power of two** (Xeon): tsl and ska
+  with the mod or prime policies are 13 to 19 percent slower on find hit at
+  100M than with a power of two, because they use `%`. They use 48 to 51
+  bytes/entry (max load 0.5), 2.4 to 2.6 times sflat. folly F14 uses the
+  same memory as boost_flat and is slower than sflat on find.
+- **Churn** (erase + insert at a fixed size, Xeon, geomean over one
+  octave): boost_flat is 1.10x to 1.15x faster than sflat. sflat is faster
+  than absl_flat (1.2x to 2.2x).
 
 ## Correctness tests
 
@@ -512,7 +547,8 @@ The tests include: randomized mixed operations against
 `std::unordered_map`, string keys, sequential keys, hash bits of keys with
 regular low bits, copy and move, swap, iterator erase, reserve and rehash,
 operations during a migration, large tables on the mmap and THP path, a
-user allocator, the capacity limit, and growth factor checks.
+user allocator, the capacity limit, growth factor checks, and churn (erase
++ insert at a fixed size, with the in-place tombstone removal).
 `growth_tiers.cpp` sets small tier limits and checks the 2x, 1.5x and 1.25x
 steps. `test_group_match` checks the SIMD back end against a scalar
 reference for every lane and every byte value.
@@ -526,6 +562,10 @@ All tests pass on each back end:
 | NEON | Apple M2, macOS 26.6, Apple clang 21, also with ASan and UBSan |
 | SWAR | `-DSFLAT_NO_SIMD=1` on x86-64 Linux and on Apple M2, also with ASan and UBSan |
 
+The churn change (erase to empty, in-place tombstone removal) was tested
+with AVX2, SSE2 and SWAR on x86-64 Linux, with ASan and UBSan. It was not
+yet tested on NEON.
+
 ## License
 
 This project uses the Apache License 2.0. The LICENSE file has the full
@@ -533,4 +573,5 @@ text. Each source file has an `SPDX-License-Identifier: Apache-2.0` line.
 
 The license covers `include/`, `tests/`, and `bench/`. `thirdparty/` holds
 the comparison maps for the benchmark. It is not in git, and each item
-keeps its original license (emhash, Boost, Abseil, sparsehash).
+keeps its original license (emhash, Boost, Abseil, sparsehash, tsl
+robin-map, ska flat_hash_map, folly, fmt).
