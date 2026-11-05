@@ -76,6 +76,8 @@ git clone https://github.com/skarupke/flat_hash_map ska && git -C ska checkout 2
 # folly F14 (optional): only the sources and fmt, no folly build or install
 git clone https://github.com/facebook/folly folly-src && git -C folly-src checkout 25c4599
 git clone --branch 11.1.4 https://github.com/fmtlib/fmt fmt
+# nanobench for the churn benchmark (optional): the copy in unordered_dense
+git clone https://github.com/martinus/unordered_dense && git -C unordered_dense checkout 7c58a8b
 cd ..
 ```
 
@@ -89,6 +91,7 @@ is built as C++20):
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/bench 1000000 10000000 100000000
+POINTS=50 ./build/churn 1000 32000 500000   # if CMake found nanobench
 ```
 
 For the THP-off runs, configure a second build with
@@ -369,6 +372,74 @@ What this shows:
 - sflat has the lowest memory, steady and peak, at all sizes in this table,
   and the fastest reserved insert. At 100M it also has the fastest
   no-reserve insert.
+
+### Churn: erase + insert at a fixed size (octave geomean)
+
+The workload and the method of Martin Ankerl's benchmark
+([martinus/unordered_dense](https://github.com/martinus/unordered_dense),
+`scripts/ab/maps.cpp`), ported to `bench/churn.cpp`:
+
+- Fill the map with n random keys, with no reserve. Then many times: erase
+  a random key that is in the map and insert a key that the map never held.
+  The size stays exactly n. Each time is per erase + insert pair.
+- The maps run interleaved in the same process (nanobench `compare()`), so
+  the drift of the machine cancels out of the ratios.
+- One size is one point on each map's load factor sawtooth, and the maps
+  grow at different sizes. So each result is the geometric mean over 50
+  sizes, log-spaced over one octave (n to 2n), as that project recommends
+  for a comparison between libraries.
+- "Lookups after churn": half hits, on the churned tables.
+- Each map uses its own default hash. `sflat (main)` is the header before
+  this change (commit 16e2a5d), in the same binary under another namespace.
+- Code: the sflat churn change (see README, "erase"), C++17, g++ 13.3.0.
+
+ns per erase + insert pair, geomean of 50 sizes per octave:
+
+| Octave | sflat | sflat (main) | boost_flat | absl_flat |
+|---|---|---|---|---|
+| 1K to 2K | 25.8 | 68.5 | **22.7** | 56.2 |
+| 32K to 64K | 36.4 | 84.6 | **33.3** | 67.0 |
+| 500K to 1M | 131.7 | 138.4 | **114.8** | 160.8 |
+
+The slowest of the 50 sizes (ns):
+
+| Octave | sflat | sflat (main) | boost_flat | absl_flat |
+|---|---|---|---|---|
+| 1K to 2K | **72.4** | 7843.4 | 150.1 | 78.7 |
+| 32K to 64K | **106.1** | 12143.1 | 173.3 | 100.0 |
+| 500K to 1M | 182.3 | 1696.4 | **141.8** | 192.2 |
+
+Lookups after churn (half hits, ns, geomean):
+
+| Octave | sflat | sflat (main) | boost_flat | absl_flat |
+|---|---|---|---|---|
+| 1K to 2K | 15.6 | 15.4 | 14.9 | 16.4 |
+| 32K to 64K | 19.8 | 19.7 | 18.9 | 19.2 |
+| 500K to 1M | 56.6 | 56.6 | 50.1 | **49.0** |
+
+What changed and why:
+
+- The old code left a tombstone on every erase. Under churn the tombstones
+  filled the table, and a rebuild into a newly allocated table ran each
+  time they reached the load limit. Near the top of the sawtooth this was
+  every few erases: 7.8 us per pair at load 0.874 with 2048 slots.
+- Now `erase` makes the slot empty when its group still has an empty slot.
+  The tombstones that are left are removed in place, without an
+  allocation. Tombstones may also use a quarter of the room above the load
+  limit, and a rebuild also runs when they reach 1/32 of the slots. Details
+  are in the README, "erase".
+- Against boost_flat the gap is now 1.14x (1K), 1.10x (32K) and 1.15x
+  (500K); it was 3.0x, 2.5x and 1.2x. sflat is faster than absl_flat in
+  all three octaves. Lookups after churn did not change.
+- Ordinary insert and find (no erase) did not change: paired runs of the
+  two headers at 1M and 10M agree within the noise of this machine.
+- What remains: groups that were full keep their tombstones until a
+  rebuild, and the rebuild costs a pass over the table. boost_flat has no
+  tombstones: its overflow byte, not an empty slot, ends a probe in every
+  group, so its erase always frees the slot.
+
+Run it (nanobench from `thirdparty/unordered_dense/test`, see "Running the
+benchmark"): `POINTS=50 ./build/churn 1000 32000 500000`.
 
 ## Intel Celeron N5105
 

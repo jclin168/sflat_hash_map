@@ -63,6 +63,23 @@ if(SFLAT_BUILD_BENCH)
       target_link_libraries(bench PRIVATE absl::flat_hash_map
                                           absl::node_hash_map)
     endif()
+    # Octave churn (bench/churn.cpp): needs nanobench.h with
+    # targetIntervalWidth(), as in thirdparty/unordered_dense/test.
+    find_path(SFLAT_NANOBENCH_DIR third-party/nanobench.h
+      PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/unordered_dense/test
+      NO_DEFAULT_PATH)
+    if(SFLAT_NANOBENCH_DIR)
+      add_executable(churn bench/churn.cpp)
+      target_link_libraries(churn PRIVATE sflat)
+      target_include_directories(churn PRIVATE ${SFLAT_BOOST_DIR}
+                                               ${SFLAT_NANOBENCH_DIR})
+      target_compile_options(churn PRIVATE -O3)
+      target_compile_definitions(churn PRIVATE NDEBUG)
+      if(absl_FOUND)
+        target_compile_definitions(churn PRIVATE HAS_ABSL)
+        target_link_libraries(churn PRIVATE absl::flat_hash_map)
+      endif()
+    endif()
     # Optional Google sparsehash (header only): thirdparty/sparsehash/include
     # or the system.
     find_path(SFLAT_SPARSEHASH_DIR sparsehash/dense_hash_map

@@ -184,6 +184,7 @@ tests/map_interface.cpp           # std::unordered_map interface tests (map)
 tests/set_interface.cpp           # std::unordered_set interface tests (set)
 tests/growth_tiers.cpp            # growth factor tests
 bench/bench.cpp                   # benchmark program
+bench/churn.cpp                   # octave churn benchmark (erase + insert)
 BENCHMARK.md                      # benchmark results for all machines
 thirdparty/                       # comparison maps for the benchmark (not in git)
 ```
@@ -266,14 +267,22 @@ key depends on it. `erase` makes the slot empty in such a group. In a group
 that was full, it leaves a tombstone. An insert whose home group has a
 tombstone and a clear overflow bit uses the tombstone at once.
 
-Tombstones are removed in place, as in abseil (`drop_tombstones()`). This
-occurs when tombstones and entries reach the load limit, or when the
-tombstones reach 1/32 of the slots (`SFLAT_TOMBSTONE_DIV`). Groups that were
-full keep their tombstones until a rebuild, so without the second limit,
-probes get longer while erases and inserts continue. The in-place rebuild
-allocates no memory. An earlier version allocated a new table each time. In
-the churn test below (erase one key, insert one new key, at a fixed size)
-at load 0.85, it did this every few thousand inserts.
+Tombstones are removed in place, as in abseil (`drop_tombstones()`). The
+in-place rebuild allocates no memory. It runs in two cases:
+
+- Entries and tombstones together reach the load limit plus a quarter of
+  the slots above it (0.906 at the default 0.875). The table still grows
+  when the entries alone reach the load limit.
+- The tombstones reach 1/32 of the slots (`SFLAT_TOMBSTONE_DIV`). Groups
+  that were full keep their tombstones until a rebuild, so without this
+  limit, probes get longer while erases and inserts continue.
+
+In the churn benchmark (erase one key and insert one new key, at a fixed
+size; see BENCHMARK.md, "Churn") this made sflat 2.3x to 2.7x faster for
+tables up to 64K entries. It is now 1.10x to 1.15x behind
+boost::unordered_flat_map and faster than absl::flat_hash_map. The old
+code left a tombstone on every erase and rebuilt into a new table, at
+load 0.874 every few erases.
 
 **Iteration** also scans a group at a time. A byte loop mispredicts on
 almost every slot when full and free slots are mixed (for example after
@@ -519,6 +528,9 @@ ska::flat_hash_map and folly F14):
   100M than with a power of two, because they use `%`. They use 48 to 51
   bytes/entry (max load 0.5), 2.4 to 2.6 times sflat. folly F14 uses the
   same memory as boost_flat and is slower than sflat on find.
+- **Churn** (erase + insert at a fixed size, Xeon, geomean over one
+  octave): boost_flat is 1.10x to 1.15x faster than sflat. sflat is faster
+  than absl_flat (1.2x to 2.2x).
 
 ## Correctness tests
 
@@ -535,7 +547,8 @@ The tests include: randomized mixed operations against
 `std::unordered_map`, string keys, sequential keys, hash bits of keys with
 regular low bits, copy and move, swap, iterator erase, reserve and rehash,
 operations during a migration, large tables on the mmap and THP path, a
-user allocator, the capacity limit, and growth factor checks.
+user allocator, the capacity limit, growth factor checks, and churn (erase
++ insert at a fixed size, with the in-place tombstone removal).
 `growth_tiers.cpp` sets small tier limits and checks the 2x, 1.5x and 1.25x
 steps. `test_group_match` checks the SIMD back end against a scalar
 reference for every lane and every byte value.
@@ -548,6 +561,10 @@ All tests pass on each back end:
 | SSE2 | `-msse4.2` (no AVX2) on x86-64 Linux, also with ASan and UBSan; `clang++ -arch x86_64` under Rosetta 2 |
 | NEON | Apple M2, macOS 26.6, Apple clang 21, also with ASan and UBSan |
 | SWAR | `-DSFLAT_NO_SIMD=1` on x86-64 Linux and on Apple M2, also with ASan and UBSan |
+
+The churn change (erase to empty, in-place tombstone removal) was tested
+with AVX2, SSE2 and SWAR on x86-64 Linux, with ASan and UBSan. It was not
+yet tested on NEON.
 
 ## License
 
