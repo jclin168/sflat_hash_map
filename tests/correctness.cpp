@@ -667,6 +667,41 @@ void test_churn_fixed_size() {
   std::printf("test_churn_fixed_size OK\n");
 }
 
+// As with std::unordered_map, erasing other elements during an iteration
+// leaves the iterator valid, and ++ must not visit an erased element. The
+// iterator keeps the lanes of its group, so this checks that it skips the
+// lanes erased since.
+void test_erase_others_while_iterating() {
+  for (size_t n : {10u, 100u, 5000u}) {
+    sflat::flat_hash_map<uint64_t, uint64_t> m;
+    std::unordered_map<uint64_t, uint64_t> alive;
+    for (uint64_t i = 0; i < n; ++i) {
+      m.emplace(i * 7919, i);
+      alive.emplace(i * 7919, i);
+    }
+    std::unordered_map<uint64_t, int> visited;
+    size_t step = 0;
+    for (auto it = m.begin(); it != m.end(); ++it, ++step) {
+      CHECK(alive.count(it->first) == 1);
+      CHECK(++visited[it->first] == 1);
+      if (step % 4 == 0) {  // erase some elements not yet visited
+        std::vector<uint64_t> drop;
+        for (const auto& kv : alive)
+          if (kv.first != it->first && !visited.count(kv.first) &&
+              kv.second % 3 == step % 3)
+            drop.push_back(kv.first);
+        for (uint64_t k : drop) {
+          CHECK(m.erase(k) == 1);
+          alive.erase(k);
+        }
+      }
+    }
+    for (const auto& kv : alive) CHECK(visited.count(kv.first) == 1);
+    CHECK(m.size() == alive.size());
+  }
+  std::printf("test_erase_others_while_iterating OK\n");
+}
+
 int main() {
   test_group_match();
   test_api_surface();
@@ -680,6 +715,7 @@ int main() {
   test_large_mixed();
   test_custom_allocator();
   test_churn_fixed_size();
+  test_erase_others_while_iterating();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
   return 0;
 }

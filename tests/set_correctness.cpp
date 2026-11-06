@@ -400,6 +400,37 @@ void test_churn_fixed_size() {
   std::printf("test_churn_fixed_size OK\n");
 }
 
+// Erasing other elements during an iteration (see the map test of the same
+// name): ++ must not visit an erased element.
+void test_erase_others_while_iterating() {
+  for (size_t n : {10u, 100u, 5000u}) {
+    sflat::flat_hash_set<uint64_t> s;
+    std::unordered_set<uint64_t> alive, visited;
+    for (uint64_t i = 0; i < n; ++i) {
+      s.insert(i * 7919);
+      alive.insert(i * 7919);
+    }
+    size_t step = 0;
+    for (auto it = s.begin(); it != s.end(); ++it, ++step) {
+      CHECK(alive.count(*it) == 1);
+      CHECK(visited.insert(*it).second);
+      if (step % 4 == 0) {
+        std::vector<uint64_t> drop;
+        for (uint64_t k : alive)
+          if (k != *it && !visited.count(k) && (k / 7919) % 3 == step % 3)
+            drop.push_back(k);
+        for (uint64_t k : drop) {
+          CHECK(s.erase(k) == 1);
+          alive.erase(k);
+        }
+      }
+    }
+    for (uint64_t k : alive) CHECK(visited.count(k) == 1);
+    CHECK(s.size() == alive.size());
+  }
+  std::printf("test_erase_others_while_iterating OK\n");
+}
+
 int main() {
   test_api_surface();
   test_random_ops();
@@ -410,6 +441,7 @@ int main() {
   test_self_aliasing();
   test_memory_per_slot();
   test_churn_fixed_size();
+  test_erase_others_while_iterating();
   std::printf("ALL SET TESTS PASSED\n");
   return 0;
 }
