@@ -2182,8 +2182,8 @@ class flat_hash_map {
     return const_iterator(this, find_ptr(key, hash_mixed(key)));
   }
 
-  size_type count(const key_type& key) const {
-    return find(key) == end() ? 0 : 1;
+  SFLAT_FIND_INLINE size_type count(const key_type& key) const {
+    return find_ptr(key, hash_mixed(key)) ? 1 : 0;
   }
 
   // Batch find for large tables. Processes keys in groups, prefetching home
@@ -2220,8 +2220,8 @@ class flat_hash_map {
     }
   }
 
-  bool contains(const key_type& key) const {  // C++20 convenience
-    return find(key) != end();
+  SFLAT_FIND_INLINE bool contains(const key_type& key) const {
+    return find_ptr(key, hash_mixed(key)) != nullptr;  // C++20 convenience
   }
 
   std::pair<iterator, iterator> equal_range(const key_type& key) {
