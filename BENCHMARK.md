@@ -92,6 +92,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/bench 1000000 10000000 100000000
 POINTS=50 ./build/churn 1000 32000 500000   # if CMake found nanobench
+POINTS=20 ./build/octave 1000 32000 500000  # all of Ankerl's workloads
 ```
 
 For the THP-off runs, configure a second build with
@@ -440,6 +441,109 @@ What changed and why:
 
 Run it (nanobench from `thirdparty/unordered_dense/test`, see "Running the
 benchmark"): `POINTS=50 ./build/churn 1000 32000 500000`.
+
+### All of Ankerl's workloads (octave geomean)
+
+`bench/octave.cpp` runs every workload of the same harness
+(`scripts/ab/maps.cpp`), with the same method as the churn test: key pools,
+interleaved `compare()`, geomean over one octave. 20 sizes per octave here
+(50 for the churn table above), so a ratio between two libraries can be off
+by some percent where their sawtooths are out of phase.
+
+- build: insert n keys into an empty map, no reserve, plus the destructor.
+  reserved: the same after `reserve(n)`. Per key.
+- hit, miss, half: lookups (`count`), all hits, no hits, half hits.
+- bump: `++m[k]` on keys in the map.
+- iterate: sum of all mapped values, per element.
+- churn: erase + insert at a fixed size, per pair.
+- ie: `++m[k]` on a present key, erase of an absent key, erase of a present
+  key, `++m[k]` on a new key; per pair of operations.
+- `uint64_t -> size_t`, each map with its own default hash. Maps:
+  emhash8 (801d02a), boost::unordered_flat_map (1.83), absl::flat_hash_map
+  (20260817.0), ankerl::unordered_dense::map (5.3.3), folly::F14ValueMap
+  (25c4599). `sflat (main)` is commit 16e2a5d (before the churn and
+  iteration changes) in the same binary. C++20 (for folly), g++ 13.3.0.
+
+ns per operation, geomean of 20 sizes per octave. **Bold** is the best in
+the row. In the 32K octave the rows half to ie have 19 sizes.
+
+**1K to 2K**
+
+| Workload | sflat | sflat (main) | boost | absl | emhash8 | udm | f14 |
+|---|---|---|---|---|---|---|---|
+| build | 21.9 | 21.8 | 19.4 | 16.1 | **8.7** | 14.9 | 12.7 |
+| reserved | 6.6 | 6.5 | 4.3 | 7.4 | **3.2** | 6.2 | 5.4 |
+| hit | 5.2 | 5.2 | **4.2** | 4.4 | 6.8 | 5.1 | 4.4 |
+| miss | 5.3 | 5.3 | **3.6** | 6.4 | 10.3 | 4.6 | 5.2 |
+| half | 11.1 | 10.9 | 16.1 | 11.3 | 14.3 | **10.4** | 10.6 |
+| bump | 6.5 | 6.5 | 5.4 | 5.4 | 8.9 | **5.3** | 6.6 |
+| iterate | 2.4 | 9.0 | 1.4 | 1.3 | 0.16 | **0.15** | 1.6 |
+| churn | 25.4 | 60.9 | **22.8** | 57.1 | 40.4 | 23.8 | 28.6 |
+| ie | 17.8 | 36.1 | 16.3 | 38.2 | 31.0 | **15.7** | 21.7 |
+
+**32K to 64K**
+
+| Workload | sflat | sflat (main) | boost | absl | emhash8 | udm | f14 |
+|---|---|---|---|---|---|---|---|
+| build | 25.6 | 25.4 | 23.3 | 16.8 | 36.5 | **14.3** | 18.9 |
+| reserved | 6.4 | 6.3 | **4.9** | 7.9 | 12.1 | 6.8 | 7.9 |
+| hit | 8.5 | 8.5 | **6.4** | 6.9 | 10.2 | 9.7 | 8.2 |
+| miss | 7.2 | 7.1 | **5.1** | 8.3 | 13.5 | 6.6 | 8.3 |
+| half | 14.0 | 13.9 | 20.5 | **13.6** | 20.0 | 14.4 | 13.9 |
+| bump | 10.0 | 10.0 | **8.5** | 9.0 | 14.2 | 10.1 | 11.9 |
+| iterate | 2.5 | 9.1 | 2.7 | 5.7 | **0.34** | **0.34** | 2.2 |
+| churn | 37.2 | 76.1 | **34.3** | 67.3 | 57.1 | 41.8 | 44.1 |
+| ie | 29.3 | 51.9 | **26.8** | 48.7 | 45.2 | 31.2 | 36.8 |
+
+**500K to 1M**
+
+| Workload | sflat | sflat (main) | boost | absl | emhash8 | udm | f14 |
+|---|---|---|---|---|---|---|---|
+| build | 53.3 | 52.8 | 41.0 | 37.0 | 75.0 | **35.1** | 49.0 |
+| reserved | 19.2 | 19.2 | **12.9** | 19.0 | 27.4 | 17.7 | 19.3 |
+| hit | 48.8 | 49.6 | **39.5** | 40.9 | 52.9 | 69.8 | 49.1 |
+| miss | 23.3 | 23.4 | **17.8** | 23.2 | 30.7 | 29.9 | 28.8 |
+| half | 54.6 | 53.6 | 51.6 | **47.4** | 59.7 | 72.9 | 55.0 |
+| bump | 49.8 | 49.6 | **46.3** | 49.8 | 73.5 | 67.3 | 63.9 |
+| iterate | 4.6 | 10.0 | 4.8 | 6.8 | 1.2 | **1.2** | 5.7 |
+| churn | 158.6 | 169.3 | **134.3** | 187.4 | 210.1 | 231.9 | 182.5 |
+| ie | 136.9 | 140.2 | **115.2** | 152.4 | 173.2 | 191.6 | 160.7 |
+
+What changed (sflat against sflat (main)):
+
+- iterate: 3.6x to 3.7x faster at 1K and 32K, 2.2x at 500K. The iterator keeps
+  the lanes of its group, so most steps are one bit operation and one
+  control byte check. sflat is now faster than boost and absl at 32K and
+  500K, and 1.8x slower than boost at 1K. emhash8 and udm store the
+  elements densely and iterate a plain array.
+- churn and ie: 1.8x to 2.4x faster at 1K and 32K (the churn change).
+- The other rows did not change (within 3 percent).
+
+What remains, and why:
+
+- hit and miss: boost is 1.24x to 1.46x faster, at all sizes. In a
+  table of any size, the home group comes from a multiply (fastrange); in
+  a power-of-two table it is a shift or a mask. The multiply is on the
+  path of every lookup. Reading the overflow word only after a miss in the
+  home group (`SFLAT_LAZY_OVERFLOW=1`, the NEON default) made hits 5 to 9
+  percent faster from 1K to 1M here, with no loss on misses. Paired runs at
+  10M and 100M did not show a clear difference, so the x86-64 default
+  stays.
+- reserved: boost is 1.3x to 1.6x faster. `reserve(n)` of sflat gives
+  about n / 0.875 slots (1728 for 1500 keys), boost more (1919), so near
+  the end of the build more home groups of sflat are full and the insert
+  takes the slow path. This is the cost of memory in proportion to the
+  entries. At 500K the arrays are larger than 2 MiB, and sflat maps fresh
+  pages with `mmap` for each new map, while glibc reuses the freed memory
+  of the map before: with `-DSFLAT_USE_MMAP=0`, a reserved insert of 700K
+  keys took 10.8 ns for sflat and 11.0 for boost. A program that builds one
+  large table does not see this.
+- build (no reserve): emhash8, udm and f14 are much faster at 1K. Growth
+  moves fewer bytes in a map that stores its elements densely, and sflat
+  migrates in steps of 64 slots, which costs time in small tables.
+
+Run it: `POINTS=20 ./build/octave 1000 32000 500000` (`ONLY=hit,miss` runs
+some workloads only).
 
 ## Intel Celeron N5105
 
