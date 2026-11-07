@@ -185,6 +185,7 @@ tests/set_interface.cpp           # std::unordered_set interface tests (set)
 tests/growth_tiers.cpp            # growth factor tests
 bench/bench.cpp                   # benchmark program
 bench/churn.cpp                   # octave churn benchmark (erase + insert)
+bench/octave.cpp                  # all workloads of Ankerl's octave benchmark
 BENCHMARK.md                      # benchmark results for all machines
 thirdparty/                       # comparison maps for the benchmark (not in git)
 ```
@@ -531,6 +532,13 @@ ska::flat_hash_map and folly F14):
 - **Churn** (erase + insert at a fixed size, Xeon, geomean over one
   octave): boost_flat is 1.10x to 1.15x faster than sflat. sflat is faster
   than absl_flat (1.2x to 2.2x).
+- **Ankerl's other workloads** (Xeon, geomean over one octave, against
+  boost, absl, emhash8, ankerl::unordered_dense and folly F14): boost is
+  1.24x to 1.46x faster on hit and miss (sflat finds the home group with
+  a multiply, as the table size is not a power of two) and 1.3x to 1.6x on
+  a reserved build (sflat reserves fewer slots). Iteration got 2.2x to
+  3.7x faster with the new iterator; at 32K and above sflat now iterates
+  faster than boost and absl. See BENCHMARK.md.
 
 ## Correctness tests
 

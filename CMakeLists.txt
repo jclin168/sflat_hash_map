@@ -79,6 +79,19 @@ if(SFLAT_BUILD_BENCH)
         target_compile_definitions(churn PRIVATE HAS_ABSL)
         target_link_libraries(churn PRIVATE absl::flat_hash_map)
       endif()
+      # All of Ankerl's workloads (bench/octave.cpp), with emhash8 and
+      # ankerl::unordered_dense; folly F14 is added below when found.
+      add_executable(octave bench/octave.cpp)
+      target_link_libraries(octave PRIVATE sflat)
+      target_include_directories(octave PRIVATE ${SFLAT_BOOST_DIR}
+        ${SFLAT_EMHASH_DIR} ${SFLAT_NANOBENCH_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/unordered_dense/include)
+      target_compile_options(octave PRIVATE -O3)
+      target_compile_definitions(octave PRIVATE NDEBUG HAS_EMHASH HAS_UDM)
+      if(absl_FOUND)
+        target_compile_definitions(octave PRIVATE HAS_ABSL)
+        target_link_libraries(octave PRIVATE absl::flat_hash_map)
+      endif()
     endif()
     # Optional Google sparsehash (header only): thirdparty/sparsehash/include
     # or the system.
@@ -130,6 +143,17 @@ if(SFLAT_BUILD_BENCH)
         ${CMAKE_CURRENT_BINARY_DIR}/folly-config ${SFLAT_FOLLY_DIR}
         ${SFLAT_FMT_DIR})
       set_target_properties(bench PROPERTIES CXX_STANDARD 20)
+      if(TARGET octave)
+        target_sources(octave PRIVATE
+          ${SFLAT_FOLLY_DIR}/folly/container/detail/F14Table.cpp
+          ${SFLAT_FOLLY_DIR}/folly/lang/SafeAssert.cpp
+          ${SFLAT_FOLLY_DIR}/folly/lang/ToAscii.cpp)
+        target_compile_definitions(octave PRIVATE HAS_FOLLY FMT_HEADER_ONLY)
+        target_include_directories(octave PRIVATE
+          ${CMAKE_CURRENT_BINARY_DIR}/folly-config ${SFLAT_FOLLY_DIR}
+          ${SFLAT_FMT_DIR})
+        set_target_properties(octave PROPERTIES CXX_STANDARD 20)
+      endif()
     endif()
   else()
     message(STATUS "emhash or boost not found, skipping bench target")

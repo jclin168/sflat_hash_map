@@ -92,13 +92,28 @@ class flat_hash_set {
     // iterator -> const_iterator conversion.
     template <bool O, typename = typename std::enable_if<IsConst && !O>::type>
     iterator_impl(const iterator_impl<O>& o) noexcept
-        : map_(o.map_), p_(o.p_) {}
+        : map_(o.map_), p_(o.p_), base_(o.base_), gctrl_(o.gctrl_),
+          rest_(o.rest_) {}
 
     reference operator*() const noexcept { return *p_; }
     pointer operator->() const noexcept { return p_; }
 
+    // Most steps stay in the group: the next lane of rest_ whose control
+    // byte is still full (an element erased since must not be visited). A
+    // step to another group, or the first step of an iterator that find()
+    // or insert() returned (base_ == nullptr), goes to next_full().
     iterator_impl& operator++() noexcept {
-      p_ = map_->first_full_from(map_->index_of(p_) + 1);
+      while (rest_) {
+        const unsigned lane = Group::Lane(rest_);
+        rest_ &= rest_ - 1;
+        if (detail::IsFull(gctrl_[lane])) {
+          p_ = base_ + lane;
+          return *this;
+        }
+      }
+      map_->next_full(base_ ? map_->index_of(base_) + kWidth
+                            : map_->index_of(p_) + 1,
+                      p_, base_, gctrl_, rest_);
       return *this;
     }
     iterator_impl operator++(int) noexcept {
@@ -130,6 +145,11 @@ class flat_hash_set {
 
     map_ptr map_ = nullptr;
     pointer p_ = nullptr;
+    // The first slot and control byte of p_'s group (base_ == nullptr: not
+    // known yet), and the lanes after p_ in that group that held an element.
+    pointer base_ = nullptr;
+    const uint8_t* gctrl_ = nullptr;
+    Mask rest_ = 0;
   };
 
   using iterator = iterator_impl<false>;
@@ -372,9 +392,15 @@ class flat_hash_set {
 
   // --------------------------------------------------------------- iteration
   // Iteration covers both tables during a migration; it does not move items.
-  iterator begin() noexcept { return iterator(this, first_full_from(0)); }
+  iterator begin() noexcept {
+    iterator it(this, nullptr);
+    next_full(0, it.p_, it.base_, it.gctrl_, it.rest_);
+    return it;
+  }
   const_iterator begin() const noexcept {
-    return const_iterator(this, first_full_from(0));
+    const_iterator it(this, nullptr);
+    next_full(0, it.p_, it.base_, it.gctrl_, it.rest_);
+    return it;
   }
   const_iterator cbegin() const noexcept { return begin(); }
   iterator end() noexcept { return iterator(this, nullptr); }
@@ -509,6 +535,46 @@ class flat_hash_set {
       return const_cast<value_type*>(
           reinterpret_cast<const value_type*>(static_cast<const void*>(s)));
     return nullptr;
+  }
+
+  // For iterators: the first element at unified index i or later goes to p
+  // (nullptr at the end), the first slot and control byte of its group to
+  // base and gctrl, and the lanes after it in that group that hold an
+  // element to rest.
+  template <typename P>
+  void next_full(size_t i, P& p, P& base, const uint8_t*& gctrl,
+                 Mask& rest) const noexcept {
+    const uint8_t* ctrl = ctrl_;
+    const slot_type* slots = slots_;
+    size_t cap = cap_;
+    for (int table = 0; table < 2; ++table) {
+      if (i < cap) {
+        size_t g = i / kWidth * kWidth;
+        Mask m = full_mask(Group::Load(ctrl + g)) &
+                 (Group::kAll << ((i - g) << Group::kShift));
+        for (;;) {
+          if (m) {
+            base = reinterpret_cast<P>(const_cast<slot_type*>(slots + g));
+            gctrl = ctrl + g;
+            p = base + Group::Lane(m);
+            rest = m & (m - 1);
+            return;
+          }
+          g += kWidth;
+          if (g >= cap) break;
+          m = full_mask(Group::Load(ctrl + g));
+        }
+      }
+      // Then the old table of a migration: unified index cap_ + j.
+      i = i < cap_ ? 0 : i - cap_;
+      ctrl = old_ctrl_;
+      slots = old_slots_;
+      cap = old_cap_;
+    }
+    p = nullptr;
+    base = nullptr;
+    gctrl = nullptr;
+    rest = 0;
   }
 
   // First full slot at index i or later of one table, or nullptr. Scans a
@@ -1563,12 +1629,12 @@ class flat_hash_set {
     return const_iterator(this, find_ptr(key, hash_mixed(key)));
   }
 
-  size_type count(const key_type& key) const {
-    return find(key) == end() ? 0 : 1;
+  SFLAT_FIND_INLINE size_type count(const key_type& key) const {
+    return find_ptr(key, hash_mixed(key)) ? 1 : 0;
   }
 
-  bool contains(const key_type& key) const {  // C++20 convenience
-    return find(key) != end();
+  SFLAT_FIND_INLINE bool contains(const key_type& key) const {
+    return find_ptr(key, hash_mixed(key)) != nullptr;  // C++20 convenience
   }
 
   std::pair<iterator, iterator> equal_range(const key_type& key) {
