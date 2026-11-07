@@ -316,6 +316,23 @@ Fastrange is monotonic in the hash: a key has its home at the same
 relative position in a table of any size. The incremental growth relies on
 this (see "Growth memory").
 
+**Seed.** Iteration visits a table in hash order. Without a seed, a loop of
+`m2[kv.first] = kv.second` with no `reserve` sends the keys in sorted home
+order into a smaller table. They pile up at its start, and the loop takes
+quadratic time (14 s for 1M keys on the i5-3230M). So each table takes a
+32-bit seed at its first allocation, and the seed is xored into the user hash
+before the mixer. The same loop then takes 1.0 s for 10M keys.
+
+- The seed stays the same while a table grows, so the growth above still works.
+- It moves with the storage, so move and swap stay O(1) and need no rehash.
+  A copy takes the seed of its source, so it still writes in order.
+- It does not make the map safe against chosen keys. Seeds come from a counter,
+  not from a random source.
+- Two tables with the same keys can iterate in a different order, and with
+  several threads the order can change from run to run.
+- It shares 8 bytes with `max_load_factor_`, now a `float` inside (the interface
+  stays `double`), so `sizeof` does not change.
+
 ### Overflow word (fast miss)
 
 Each group has a 32-bit Bloom filter. When an insert puts a key into a

@@ -29,6 +29,7 @@
 // (std::pair<const Key, T> in aligned raw storage), and one overflow Bloom
 // word per group (SFLAT_OVERFLOW_BITS, default 32).
 
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -220,6 +221,17 @@ inline constexpr EmptyCtrl kEmptyCtrl{};
 inline uint64_t MixHash(uint64_t x) noexcept {
   const __uint128_t r = (__uint128_t)x * 0x9E3779B97F4A7C15ULL;
   return (uint64_t)r ^ (uint64_t)(r >> 64);
+}
+
+// Seed of a map or set, taken at its first allocation and xored into the user
+// hash before MixHash. Iteration visits a table in hash order, and Fastrange
+// is monotonic. So without a seed, inserting while iterating another table
+// sends the keys in sorted home order into a smaller table: they pile up at
+// its start, and a loop of m2[kv.first] = kv.second without reserve() takes
+// quadratic time. Never 0: 0 means "not taken yet".
+inline uint32_t NextSeed() noexcept {
+  static std::atomic<uint32_t> counter{0};
+  return ((counter.fetch_add(1, std::memory_order_relaxed) + 1) * 0x9E3779B1U) | 1U;
 }
 
 // 32-bit Lemire fastrange: maps h uniformly into [0, n) with a single
@@ -863,6 +875,7 @@ class flat_hash_map {
     swap(growth_left_, other.growth_left_);
     swap(max_load_factor_, other.max_load_factor_);
     swap(hash_, other.hash_);
+    swap(seed_, other.seed_);
     swap(equal_, other.equal_);
     swap(old_slots_, other.old_slots_);
     swap(old_ctrl_, other.old_ctrl_);
@@ -930,6 +943,7 @@ class flat_hash_map {
   // Precondition: *this is empty and has no storage.
   void copy_elements_from(const flat_hash_map& other) {
     if (other.size_ == 0) return;
+    seed_ = other.seed_;  // same order as other, so the writes stay sequential
     rehash_to(min_cap_for(other.size_));
     for_each_slot(other, [this](const value_type* s) { place_unique(*s); });
     size_ = other.size_;
@@ -939,6 +953,7 @@ class flat_hash_map {
   // Precondition: *this is empty and has no storage.
   void move_elements_from(flat_hash_map& other) {
     if (other.size_ == 0) return;
+    seed_ = other.seed_;
     rehash_to(min_cap_for(other.size_));
     for_each_slot(other,
                   [this](value_type* s) { place_unique(std::move(*s)); });
@@ -950,6 +965,8 @@ class flat_hash_map {
   // Take all storage of other (including an ongoing migration).
   // Precondition: *this has no storage.
   void steal_storage(flat_hash_map& other) noexcept {
+    seed_ = other.seed_;
+    other.seed_ = 0;
     slots_ = other.slots_;
     ctrl_ = other.ctrl_;
     overflow_ = other.overflow_;
@@ -1103,7 +1120,7 @@ class flat_hash_map {
   void destroy_slot(size_t i) noexcept { slot_at(i)->~value_type(); }
 
   uint64_t hash_mixed(const key_type& k) const {
-    return detail::MixHash(static_cast<uint64_t>(hash_(k)));
+    return detail::MixHash(static_cast<uint64_t>(hash_(k)) ^ seed_);
   }
 
   // Element with key in the given table, or nullptr. A table with cap 0 must
@@ -1506,6 +1523,10 @@ class flat_hash_map {
   template <typename Construct>
   SFLAT_NOINLINE std::pair<iterator, bool> insert_with_growth(
       const key_type& key, uint64_t h, Construct& construct) {
+    if (seed_ == 0) {  // first allocation: h was computed without the seed
+      seed_ = detail::NextSeed();
+      h = hash_mixed(key);
+    }
     if (value_type* e = find_ptr(key, h)) return {iterator(this, e), false};
     alignas(value_type) unsigned char buf[sizeof(value_type)];
     construct(static_cast<void*>(buf));
@@ -1893,6 +1914,7 @@ class flat_hash_map {
   // order and releases the old slots behind the cursor, so the peak stays
   // near the size of the new table.
   void rehash_to(size_t new_cap) {
+    if (seed_ == 0 && new_cap != 0) seed_ = detail::NextSeed();
     // If migrating, finish it first to avoid losing unmigrated elements.
     if (is_migrating()) finish_migration();
     check_capacity(new_cap);
@@ -2270,7 +2292,7 @@ class flat_hash_map {
 
   void max_load_factor(double ml) {
     assert(ml > 0.0 && ml < 1.0);
-    max_load_factor_ = ml;
+    max_load_factor_ = static_cast<float>(ml);
     update_limit();
     if (cap_ && size_ > limit_) rehash_to(min_cap_for(size_));
   }
@@ -2359,10 +2381,11 @@ class flat_hash_map {
   detail::Overflow* overflow_ = empty_overflow();  // size cap_/kWidth; per-group overflow Bloom bits
   size_type cap_ = 0;
   size_type size_ = 0;
+  uint32_t seed_ = 0;  // see detail::NextSeed(); 0 until the first allocation
+  float max_load_factor_ = static_cast<float>(kDefaultMaxLoadFactor);
+  size_type growth_left_ = 0;  // see reset_growth_left()
   size_type deleted_ = 0;  // tombstones in the current table
   size_type limit_ = 0;    // load_limit() of the current table
-  size_type growth_left_ = 0;  // see reset_growth_left()
-  double max_load_factor_ = kDefaultMaxLoadFactor;
   Hash hash_;
   KeyEqual equal_;
   slot_alloc slot_alloc_;

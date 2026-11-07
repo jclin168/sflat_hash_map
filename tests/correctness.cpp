@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <random>
 #include <stdexcept>
@@ -702,6 +703,88 @@ void test_erase_others_while_iterating() {
   std::printf("test_erase_others_while_iterating OK\n");
 }
 
+// Inserting while iterating another table must not take quadratic time. Each
+// table has its own seed, so iteration order is not the home order of another
+// table. The seed moves with the storage. (1M keys took 14 s without a seed.)
+void test_iterate_and_insert() {
+  using M = sflat::flat_hash_map<uint64_t, uint64_t>;
+  std::mt19937_64 r(42);
+  M a;
+  for (int i = 0; i < 1000000; ++i) {
+    M& m = a;
+    m[r()] = 1;
+  }
+  M b;
+  const auto start = std::chrono::steady_clock::now();
+  for (const auto& kv : a) b[kv.first] = kv.second;
+  const std::chrono::duration<double> took =
+      std::chrono::steady_clock::now() - start;
+  CHECK(took.count() < 5.0);
+  CHECK(b.size() == a.size());
+  CHECK(a.begin()->first != b.begin()->first);  // different seeds, different order
+
+  const auto all_found = [](const M& x, uint64_t n) {
+    for (uint64_t i = 0; i < n; ++i)
+      if (x.find(i) == x.end()) return false;
+    return x.size() == n;
+  };
+  const uint64_t n = 1000;
+  const auto filled = [&] {
+    M x;
+    for (uint64_t i = 0; i < n; ++i) x[i] = i;
+    return x;
+  };
+  M moved(filled());
+  CHECK(all_found(moved, n));
+  M from = filled();
+  M to(std::move(from));
+  CHECK(all_found(to, n));
+  // A moved-from table takes a new seed and works again.
+  from.clear();
+  for (uint64_t i = 0; i < n; ++i) {
+    M& x = from;
+    x[i] = i;
+  }
+  CHECK(all_found(from, n));
+  M assigned;
+  assigned = std::move(from);
+  CHECK(all_found(assigned, n));
+  M copy_assigned;
+  copy_assigned = assigned;
+  CHECK(all_found(copy_assigned, n));
+  M copied(assigned);
+  CHECK(all_found(copied, n));
+  M s1 = filled(), s2;
+  s1.swap(s2);
+  CHECK(s1.empty() && all_found(s2, n));
+  std::vector<M> v(1);
+  for (uint64_t i = 0; i < n; ++i) {
+    M& x = v[0];
+    x[i] = i;
+  }
+  v.resize(100);
+  CHECK(all_found(v[0], n));
+  // The first insert computes the hash before the seed is taken.
+  M one;
+  auto first_insert = one.find(7);
+  CHECK(first_insert == one.end());
+  {
+    M& x = one;
+    uint64_t i = 7;
+    x[i] = i;
+  }
+  CHECK(one.find(7) != one.end());
+  M reserved;
+  reserved.reserve(100);
+  {
+    M& x = reserved;
+    uint64_t i = 7;
+    x[i] = i;
+  }
+  CHECK(reserved.find(7) != reserved.end());
+  std::printf("test_iterate_and_insert OK\n");
+}
+
 int main() {
   test_group_match();
   test_api_surface();
@@ -716,6 +799,7 @@ int main() {
   test_custom_allocator();
   test_churn_fixed_size();
   test_erase_others_while_iterating();
+  test_iterate_and_insert();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
   return 0;
 }
