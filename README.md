@@ -188,6 +188,7 @@ tools/multipliers.cpp             # search and checks of the seed mixers
 bench/bench.cpp                   # benchmark program
 bench/churn.cpp                   # octave churn benchmark (erase + insert)
 bench/octave.cpp                  # all workloads of Ankerl's octave benchmark
+bench/many_maps.cpp               # member layout: many small maps, scattered access
 BENCHMARK.md                      # benchmark results for all machines
 thirdparty/                       # comparison maps for the benchmark (not in git)
 ```

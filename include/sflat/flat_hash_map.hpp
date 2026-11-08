@@ -2347,13 +2347,25 @@ class flat_hash_map {
   }
 
   // ------------------------------------------------------------------- data
-  slot_type* slots_ = nullptr;
-  uint8_t* ctrl_ = empty_ctrl();  // size cap_; H2 / kEmpty / kDeleted
-  detail::Overflow* overflow_ = empty_overflow();  // size cap_/kWidth; per-group overflow Bloom bits
-  size_type cap_ = 0;
-  size_type size_ = 0;
+  // The members of the fast paths first, in bytes [0, 64). The insert fast
+  // path reads the mixer, the table and cap_ and writes growth_left_ and
+  // size_: bytes [0, 48), so the members it writes share a cache line with
+  // those it reads. find reads the same table members, the overflow words
+  // and old_cap_ (migrating?), but no growth_left_ or size_.
+  //
+  // Measured on the i5-3230M (insert and find in 131072 maps of 12 keys,
+  // scattered, so the map object misses the cache): 2.5% faster inserts than
+  // with size_ next to cap_ and the mixer behind it; with old_cap_ moved
+  // before growth_left_ for find instead, inserts were 3% slower and finds
+  // no faster (the adjacent-line prefetcher fetches the second line anyway).
   detail::Mixer mix_;  // from the seed taken at the first allocation
+  uint8_t* ctrl_ = empty_ctrl();  // size cap_; H2 / kEmpty / kDeleted
+  slot_type* slots_ = nullptr;
+  size_type cap_ = 0;
   size_type growth_left_ = 0;  // see reset_growth_left()
+  size_type size_ = 0;
+  detail::Overflow* overflow_ = empty_overflow();  // size cap_/kWidth; per-group overflow Bloom bits
+  size_type old_cap_ = 0;  // != 0 while migrating; see the members below
   size_type deleted_ = 0;  // tombstones in the current table
   size_type limit_ = 0;    // load_limit() of the current table
   Hash hash_;
@@ -2368,7 +2380,6 @@ class flat_hash_map {
   slot_type* old_slots_ = nullptr;
   uint8_t* old_ctrl_ = nullptr;
   detail::Overflow* old_overflow_ = nullptr;
-  size_type old_cap_ = 0;
   size_type mig_pos_ = 0;       // next old slot to migrate
   size_type old_released_ = 0;  // old slot bytes given back to the kernel
   size_type huge_hint_ = 0;     // new slot bytes with the huge page hint

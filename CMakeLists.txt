@@ -39,6 +39,11 @@ if(SFLAT_BUILD_TESTS)
 endif()
 
 if(SFLAT_BUILD_BENCH)
+  # Member layout of the fast paths (bench/many_maps.cpp): sflat only.
+  add_executable(many_maps bench/many_maps.cpp)
+  target_link_libraries(many_maps PRIVATE sflat)
+  target_compile_options(many_maps PRIVATE -O3)
+  target_compile_definitions(many_maps PRIVATE NDEBUG SFLAT_PROCESS_SEED=1)
   # emhash: thirdparty/emhash (old flat layout) or thirdparty/emhash/include
   # (current upstream layout). Boost: thirdparty/boost/include or system.
   find_path(SFLAT_EMHASH_DIR emhash/hash_table8.hpp
