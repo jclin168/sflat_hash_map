@@ -22,7 +22,7 @@
 //    in place. Iteration is a plain linear scan.
 //  * The user hash is passed through a single-multiply mixer so the map
 //    stays robust even with weak hashes (e.g. std::hash<uint64_t> identity on
-//    sequential keys).
+//    sequential keys). Each table picks its mixer by a seed (hash_mix.hpp).
 //
 // Layout: one control byte per slot (SwissTable-style: H2 in [0,0xFD],
 // 0xFF = empty, 0xFE = deleted) stored in a dense array, a separate slot array
@@ -42,6 +42,8 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+
+#include "hash_mix.hpp"
 
 // SIMD back end for group probing (define SFLAT_NO_SIMD=1 to force the
 // portable one):
@@ -202,25 +204,6 @@ struct EmptyCtrl {
   }
 };
 inline constexpr EmptyCtrl kEmptyCtrl{};
-
-// Single-multiply avalanche mixer, boost-style mulx64:
-//   (x * C) ^ ((x * C) >> 64),  C = 2^64/phi (golden ratio).
-// One 128-bit multiply instead of a splitmix64 finalizer (which needs two
-// *dependent* 64-bit multiplies): much shorter critical path, while still
-// robust against weak hashes such as std::hash<uint64_t> identity on
-// sequential keys.
-//
-// Do not drop the high half (a plain 64-bit x * C). In a 64-bit product,
-// bit k depends only on bits [0, k] of x. Then H2 (bits [0,8)) depends only
-// on the low 8 bits of the key, and the overflow bit only on the low 13
-// bits. Keys with regular low bits (aligned pointers, i << 8, i * 64) then
-// share a few H2 values or one, and a find compares many keys: up to 10x
-// slower. The xor of the high half makes every output bit depend on every
-// key bit.
-inline uint64_t MixHash(uint64_t x) noexcept {
-  const __uint128_t r = (__uint128_t)x * 0x9E3779B97F4A7C15ULL;
-  return (uint64_t)r ^ (uint64_t)(r >> 64);
-}
 
 // 32-bit Lemire fastrange: maps h uniformly into [0, n) with a single
 // 32x32->64 IMUL (1 uop, no implicit registers). A 128-bit multiply here
@@ -767,40 +750,40 @@ class flat_hash_map {
       : flat_hash_map(il, bucket_count, hash, KeyEqual(), alloc) {}
 
   flat_hash_map(const flat_hash_map& other)
-      : max_load_factor_(other.max_load_factor_),
-        hash_(other.hash_),
+      : hash_(other.hash_),
         equal_(other.equal_),
         slot_alloc_(slot_traits::select_on_container_copy_construction(
             other.slot_alloc_)),
         ctrl_alloc_(ctrl_traits::select_on_container_copy_construction(
-            other.ctrl_alloc_)) {
+            other.ctrl_alloc_)),
+        max_load_factor_(other.max_load_factor_) {
     copy_elements_from(other);
   }
 
   flat_hash_map(const flat_hash_map& other, const Allocator& alloc)
-      : max_load_factor_(other.max_load_factor_),
-        hash_(other.hash_),
+      : hash_(other.hash_),
         equal_(other.equal_),
         slot_alloc_(alloc),
-        ctrl_alloc_(alloc) {
+        ctrl_alloc_(alloc),
+        max_load_factor_(other.max_load_factor_) {
     copy_elements_from(other);
   }
 
   flat_hash_map(flat_hash_map&& other) noexcept
-      : max_load_factor_(other.max_load_factor_),
-        hash_(std::move(other.hash_)),
+      : hash_(std::move(other.hash_)),
         equal_(std::move(other.equal_)),
         slot_alloc_(std::move(other.slot_alloc_)),
-        ctrl_alloc_(std::move(other.ctrl_alloc_)) {
+        ctrl_alloc_(std::move(other.ctrl_alloc_)),
+        max_load_factor_(other.max_load_factor_) {
     steal_storage(other);
   }
 
   flat_hash_map(flat_hash_map&& other, const Allocator& alloc)
-      : max_load_factor_(other.max_load_factor_),
-        hash_(std::move(other.hash_)),
+      : hash_(std::move(other.hash_)),
         equal_(std::move(other.equal_)),
         slot_alloc_(alloc),
-        ctrl_alloc_(alloc) {
+        ctrl_alloc_(alloc),
+        max_load_factor_(other.max_load_factor_) {
     if (alloc == other.get_allocator()) {
       steal_storage(other);
     } else {
@@ -863,6 +846,7 @@ class flat_hash_map {
     swap(growth_left_, other.growth_left_);
     swap(max_load_factor_, other.max_load_factor_);
     swap(hash_, other.hash_);
+    swap(mix_, other.mix_);
     swap(equal_, other.equal_);
     swap(old_slots_, other.old_slots_);
     swap(old_ctrl_, other.old_ctrl_);
@@ -930,6 +914,7 @@ class flat_hash_map {
   // Precondition: *this is empty and has no storage.
   void copy_elements_from(const flat_hash_map& other) {
     if (other.size_ == 0) return;
+    mix_ = other.mix_;  // same order as other, so the writes stay sequential
     rehash_to(min_cap_for(other.size_));
     for_each_slot(other, [this](const value_type* s) { place_unique(*s); });
     size_ = other.size_;
@@ -939,6 +924,7 @@ class flat_hash_map {
   // Precondition: *this is empty and has no storage.
   void move_elements_from(flat_hash_map& other) {
     if (other.size_ == 0) return;
+    mix_ = other.mix_;
     rehash_to(min_cap_for(other.size_));
     for_each_slot(other,
                   [this](value_type* s) { place_unique(std::move(*s)); });
@@ -950,6 +936,8 @@ class flat_hash_map {
   // Take all storage of other (including an ongoing migration).
   // Precondition: *this has no storage.
   void steal_storage(flat_hash_map& other) noexcept {
+    mix_ = other.mix_;
+    other.mix_ = detail::Mixer();
     slots_ = other.slots_;
     ctrl_ = other.ctrl_;
     overflow_ = other.overflow_;
@@ -1103,7 +1091,7 @@ class flat_hash_map {
   void destroy_slot(size_t i) noexcept { slot_at(i)->~value_type(); }
 
   uint64_t hash_mixed(const key_type& k) const {
-    return detail::MixHash(static_cast<uint64_t>(hash_(k)));
+    return detail::HashKey(hash_, k, mix_);
   }
 
   // Element with key in the given table, or nullptr. A table with cap 0 must
@@ -1506,6 +1494,10 @@ class flat_hash_map {
   template <typename Construct>
   SFLAT_NOINLINE std::pair<iterator, bool> insert_with_growth(
       const key_type& key, uint64_t h, Construct& construct) {
+    if (!mix_.taken()) {  // first allocation: h was computed without a mixer
+      mix_ = detail::Mixer::Next();
+      h = hash_mixed(key);
+    }
     if (value_type* e = find_ptr(key, h)) return {iterator(this, e), false};
     alignas(value_type) unsigned char buf[sizeof(value_type)];
     construct(static_cast<void*>(buf));
@@ -1893,6 +1885,7 @@ class flat_hash_map {
   // order and releases the old slots behind the cursor, so the peak stays
   // near the size of the new table.
   void rehash_to(size_t new_cap) {
+    if (!mix_.taken() && new_cap != 0) mix_ = detail::Mixer::Next();
     // If migrating, finish it first to avoid losing unmigrated elements.
     if (is_migrating()) finish_migration();
     check_capacity(new_cap);
@@ -2270,7 +2263,7 @@ class flat_hash_map {
 
   void max_load_factor(double ml) {
     assert(ml > 0.0 && ml < 1.0);
-    max_load_factor_ = ml;
+    max_load_factor_ = static_cast<float>(ml);
     update_limit();
     if (cap_ && size_ > limit_) rehash_to(min_cap_for(size_));
   }
@@ -2354,25 +2347,42 @@ class flat_hash_map {
   }
 
   // ------------------------------------------------------------------- data
-  slot_type* slots_ = nullptr;
+  // The members of the fast paths first, in bytes [0, 64). The insert fast
+  // path reads the mixer, the table and cap_ and writes growth_left_ and
+  // size_: bytes [0, 48), so the members it writes share a cache line with
+  // those it reads. find reads the same table members, the overflow words
+  // and old_cap_ (migrating?), but no growth_left_ or size_.
+  //
+  // Measured on the i5-3230M with perf (bench/many_maps.cpp: 131072 maps of
+  // 12 keys, scattered, so the map object misses the cache). A find has about
+  // 6 cache misses in flight, so a second line of the object costs no time:
+  // with old_cap_ at byte 112 a find missed 0.26 more lines and took as long.
+  // A loop that stores through the found element (m[k] = v) has about 1.4 in
+  // flight, so each line costs: 3.46 load misses and 887 cycles per call here,
+  // 3.70 and 930 with old_cap_ at byte 112, 3.74 and 930 with growth_left_
+  // and size_ behind old_cap_ (all of find in one line).
+  detail::Mixer mix_;  // from the seed taken at the first allocation
   uint8_t* ctrl_ = empty_ctrl();  // size cap_; H2 / kEmpty / kDeleted
-  detail::Overflow* overflow_ = empty_overflow();  // size cap_/kWidth; per-group overflow Bloom bits
+  slot_type* slots_ = nullptr;
   size_type cap_ = 0;
+  size_type growth_left_ = 0;  // see reset_growth_left()
   size_type size_ = 0;
+  detail::Overflow* overflow_ = empty_overflow();  // size cap_/kWidth; per-group overflow Bloom bits
+  size_type old_cap_ = 0;  // != 0 while migrating; see the members below
   size_type deleted_ = 0;  // tombstones in the current table
   size_type limit_ = 0;    // load_limit() of the current table
-  size_type growth_left_ = 0;  // see reset_growth_left()
-  double max_load_factor_ = kDefaultMaxLoadFactor;
   Hash hash_;
   KeyEqual equal_;
   slot_alloc slot_alloc_;
   ctrl_alloc ctrl_alloc_;
+  // In the padding behind the (usually empty) members above. A float: the
+  // interface stays double.
+  float max_load_factor_ = static_cast<float>(kDefaultMaxLoadFactor);
   // Incremental rehash state: when growing, old table is migrated to new
   // in small steps to avoid latency spikes.
   slot_type* old_slots_ = nullptr;
   uint8_t* old_ctrl_ = nullptr;
   detail::Overflow* old_overflow_ = nullptr;
-  size_type old_cap_ = 0;
   size_type mig_pos_ = 0;       // next old slot to migrate
   size_type old_released_ = 0;  // old slot bytes given back to the kernel
   size_type huge_hint_ = 0;     // new slot bytes with the huge page hint

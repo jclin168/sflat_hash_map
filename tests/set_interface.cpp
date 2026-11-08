@@ -345,9 +345,12 @@ void test_hash_policy() {
   CHECK(s.load_factor() > 0 && s.load_factor() <= s.max_load_factor());
   CHECK(std::abs(s.load_factor() - static_cast<double>(s.size()) / s.bucket_count()) < 1e-6);
   // max_load_factor(z) is a hint (libc++ keeps it >= the current load
-  // factor); the portable guarantee is load_factor() <= max_load_factor().
+  // factor, libstdc++ waits for the next insert); the portable guarantee is
+  // load_factor() <= max_load_factor() once an insert may have grown it.
   s.max_load_factor(0.5f);
+  s.insert(1000);
   CHECK(s.load_factor() <= s.max_load_factor() + 1e-6);
+  s.erase(1000);
   for (int i = 0; i < 1000; ++i) CHECK(s.count(i) == 1);
   S low;
   low.max_load_factor(0.5f);

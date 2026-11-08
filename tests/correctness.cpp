@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <random>
 #include <stdexcept>
@@ -259,8 +260,9 @@ void test_api_surface() {
     ++local_count;
   }
   CHECK(local_count >= 1);  // key 2 itself hashes to bucket bk
-  // bucket_size(n): open addressing, at most one element per slot n
-  CHECK(b.bucket_size(bk) <= 1);
+  // bucket_size(n): the elements with bucket(key) == n, as the local
+  // iterators visit them. Keys 2 and 3 can share a bucket.
+  CHECK(b.bucket_size(bk) == local_count);
   // load factor / max load factor
   CHECK(m9.load_factor() >= 0.0);
   const double old = m9.max_load_factor();
@@ -345,6 +347,7 @@ void test_hash_bits_structured_keys() {
   using sflat::detail::Fastrange;
   using sflat::detail::H2;
   using sflat::detail::MixHash;
+  using sflat::detail::SeededMixHash;
   struct Pattern {
     const char* name;
     uint64_t (*key)(uint64_t);
@@ -360,13 +363,16 @@ void test_hash_bits_structured_keys() {
   };
   const uint64_t n = 4096;
   const size_t ng = 1024;  // 4 keys per group on average
-  for (const Pattern& p : patterns) {
+  // seed < 0 checks MixHash; else the mixer of that seed.
+  const auto check = [&](const Pattern& p, int64_t seed) {
     bool h2[256] = {};
     bool ovf[64] = {};
     std::vector<bool> grp(ng);
     size_t n_h2 = 0, n_ovf = 0, n_grp = 0;
     for (uint64_t i = 0; i < n; ++i) {
-      const uint64_t h = MixHash(std::hash<uint64_t>{}(p.key(i)));
+      const uint64_t x = std::hash<uint64_t>{}(p.key(i));
+      const uint64_t h =
+          seed < 0 ? MixHash(x) : SeededMixHash(x, static_cast<uint32_t>(seed));
       const unsigned b = static_cast<unsigned>(H2(h));
       if (!h2[b]) h2[b] = true, ++n_h2;
       const unsigned o = static_cast<unsigned>((h >> 8) & (SFLAT_OVERFLOW_BITS - 1));
@@ -376,14 +382,85 @@ void test_hash_bits_structured_keys() {
     }
     // Random hashes give about 254 H2 values, all overflow bits, and about
     // 1005 of 1024 groups.
-    if (n_h2 < 240 || n_ovf < SFLAT_OVERFLOW_BITS || n_grp < 900)
-      std::printf("  %s: %zu H2 values, %zu overflow bits, %zu groups\n",
-                  p.name, n_h2, n_ovf, n_grp);
-    CHECK(n_h2 >= 240);
-    CHECK(n_ovf == SFLAT_OVERFLOW_BITS);
-    CHECK(n_grp >= 900);
+    const bool ok = n_h2 >= 240 && n_ovf == SFLAT_OVERFLOW_BITS && n_grp >= 900;
+    if (!ok)
+      std::printf("  %s, seed %lld: %zu H2 values, %zu overflow bits, %zu groups\n",
+                  p.name, static_cast<long long>(seed), n_h2, n_ovf, n_grp);
+    return ok;
+  };
+  for (const Pattern& p : patterns) {
+    CHECK(check(p, -1));
+    // The low 12 bits of a seed pick its mixer: check all 4096.
+    bool all = true;
+    for (int64_t seed = 0; seed < 4096 && all; ++seed) all = check(p, seed);
+    CHECK(all);
   }
   std::printf("test_hash_bits_structured_keys OK\n");
+}
+
+// Keys of table A, in A's iteration order (its home order), go into a table
+// B with half as many slots, up to load 0.8, with linear probing: the
+// growth step where m2[kv.first] = kv.second piles up when the orders of
+// the two seeds are related. Returns the mean probe length: about 3 for
+// independent orders, thousands for shifted ones.
+double seed_pair_probes(uint64_t (*key)(uint64_t), uint32_t seed_a,
+                        uint32_t seed_b) {
+  using sflat::detail::Fastrange;
+  using sflat::detail::SeededMixHash;
+  const size_t n = 1 << 15, cap = n / 2, inserts = cap * 4 / 5;
+  std::vector<std::pair<uint32_t, uint64_t>> order(n);
+  for (size_t i = 0; i < n; ++i)
+    order[i] = {static_cast<uint32_t>(SeededMixHash(key(i), seed_a) >> 32), key(i)};
+  std::sort(order.begin(), order.end());
+  std::vector<bool> used(cap);
+  uint64_t probes = 0;
+  for (size_t i = 0; i < inserts; ++i) {
+    size_t s = Fastrange(SeededMixHash(order[i].second, seed_b), cap);
+    while (used[s]) s = s + 1 == cap ? 0 : s + 1, ++probes;
+    used[s] = true;
+    ++probes;
+  }
+  return static_cast<double>(probes) / inserts;
+}
+
+// Seed pairs whose orders were related with a seed xored into the input of
+// one multiplier: seeds that differ in one bit, and seeds next to each other
+// in the counter of NextSeed. Pairs with the same multiplier (seed & 63) are
+// skipped: the xor cannot make their orders independent (see
+// SeededMixHash). The simulation is harsher than the map: the worst pair
+// below (16.8 probes) is within 2x of the usual time in the map.
+void test_seed_pairs() {
+#if SFLAT_NO_SEED
+  std::printf("test_seed_pairs skipped (SFLAT_NO_SEED)\n");
+  return;
+#endif
+  uint64_t (*const keys[])(uint64_t) = {
+      [](uint64_t i) { return i; },
+      [](uint64_t i) { return i * 1000; },
+      [](uint64_t i) -> uint64_t { return 0x7f0000000000ull + i * 16; },
+      [](uint64_t i) { return i << 32; },
+  };
+  std::vector<std::pair<uint32_t, uint32_t>> pairs;
+  const uint32_t base[] = {0x9E3779B1u, 0x12345678u, 0xDEADBEEFu};
+  for (uint32_t s : base)
+    for (int b = 0; b < 12; ++b) pairs.push_back({s, s ^ (1u << b)});
+  for (uint32_t s : base)
+    for (uint32_t c = 1; c <= 8; ++c)
+      pairs.push_back({s + c * 0x9E3779B1u, s + (c + 1) * 0x9E3779B1u});
+  std::mt19937 r(7);
+  for (int i = 0; i < 32; ++i) pairs.push_back({r(), r()});
+  double worst = 0;
+  for (const auto& sp : pairs) {
+    if (((sp.first ^ sp.second) & 63) == 0) continue;  // same multiplier
+    for (auto key : keys) {
+      const double p = seed_pair_probes(key, sp.first, sp.second);
+      if (p > 20)
+        std::printf("  seeds %08x %08x: %.1f probes\n", sp.first, sp.second, p);
+      worst = std::max(worst, p);
+    }
+  }
+  CHECK(worst <= 20);
+  std::printf("test_seed_pairs OK (worst %.1f probes)\n", worst);
 }
 
 // Operations that run while an incremental migration is in progress.
@@ -702,6 +779,92 @@ void test_erase_others_while_iterating() {
   std::printf("test_erase_others_while_iterating OK\n");
 }
 
+// Inserting while iterating another table must not take quadratic time. Each
+// table has its own seed, so iteration order is not the home order of another
+// table. The seed moves with the storage. (1M keys took 14 s without a seed.)
+void test_iterate_and_insert() {
+#if SFLAT_NO_SEED
+  std::printf("test_iterate_and_insert skipped (SFLAT_NO_SEED)\n");
+  return;
+#endif
+  using M = sflat::flat_hash_map<uint64_t, uint64_t>;
+  std::mt19937_64 r(42);
+  M a;
+  for (int i = 0; i < 1000000; ++i) {
+    M& m = a;
+    m[r()] = 1;
+  }
+  M b;
+  const auto start = std::chrono::steady_clock::now();
+  for (const auto& kv : a) b[kv.first] = kv.second;
+  const std::chrono::duration<double> took =
+      std::chrono::steady_clock::now() - start;
+  CHECK(took.count() < 5.0);
+  CHECK(b.size() == a.size());
+  CHECK(a.begin()->first != b.begin()->first);  // different seeds, different order
+
+  const auto all_found = [](const M& x, uint64_t n) {
+    for (uint64_t i = 0; i < n; ++i)
+      if (x.find(i) == x.end()) return false;
+    return x.size() == n;
+  };
+  const uint64_t n = 1000;
+  const auto filled = [&] {
+    M x;
+    for (uint64_t i = 0; i < n; ++i) x[i] = i;
+    return x;
+  };
+  M moved(filled());
+  CHECK(all_found(moved, n));
+  M from = filled();
+  M to(std::move(from));
+  CHECK(all_found(to, n));
+  // A moved-from table takes a new seed and works again.
+  from.clear();
+  for (uint64_t i = 0; i < n; ++i) {
+    M& x = from;
+    x[i] = i;
+  }
+  CHECK(all_found(from, n));
+  M assigned;
+  assigned = std::move(from);
+  CHECK(all_found(assigned, n));
+  M copy_assigned;
+  copy_assigned = assigned;
+  CHECK(all_found(copy_assigned, n));
+  M copied(assigned);
+  CHECK(all_found(copied, n));
+  M s1 = filled(), s2;
+  s1.swap(s2);
+  CHECK(s1.empty() && all_found(s2, n));
+  std::vector<M> v(1);
+  for (uint64_t i = 0; i < n; ++i) {
+    M& x = v[0];
+    x[i] = i;
+  }
+  v.resize(100);
+  CHECK(all_found(v[0], n));
+  // The first insert computes the hash before the seed is taken.
+  M one;
+  auto first_insert = one.find(7);
+  CHECK(first_insert == one.end());
+  {
+    M& x = one;
+    uint64_t i = 7;
+    x[i] = i;
+  }
+  CHECK(one.find(7) != one.end());
+  M reserved;
+  reserved.reserve(100);
+  {
+    M& x = reserved;
+    uint64_t i = 7;
+    x[i] = i;
+  }
+  CHECK(reserved.find(7) != reserved.end());
+  std::printf("test_iterate_and_insert OK\n");
+}
+
 int main() {
   test_group_match();
   test_api_surface();
@@ -710,12 +873,14 @@ int main() {
   test_growth_factor();
   test_sequential_keys();
   test_hash_bits_structured_keys();
+  test_seed_pairs();
   test_during_migration();
   test_self_aliasing();
   test_large_mixed();
   test_custom_allocator();
   test_churn_fixed_size();
   test_erase_others_while_iterating();
+  test_iterate_and_insert();
   std::printf("ALL CORRECTNESS TESTS PASSED\n");
   return 0;
 }

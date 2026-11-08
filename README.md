@@ -176,16 +176,19 @@ is fine too:
 ## File structure
 
 ```
-include/sflat/flat_hash_map.hpp   # the map (the only header a map needs)
+include/sflat/flat_hash_map.hpp   # the map
 include/sflat/flat_hash_set.hpp   # the set (includes flat_hash_map.hpp)
+include/sflat/hash_mix.hpp        # hash mixer and seeds (included by both)
 tests/correctness.cpp             # correctness tests (map)
 tests/set_correctness.cpp         # correctness tests (set)
 tests/map_interface.cpp           # std::unordered_map interface tests (map)
 tests/set_interface.cpp           # std::unordered_set interface tests (set)
 tests/growth_tiers.cpp            # growth factor tests
+tools/multipliers.cpp             # search and checks of the seed mixers
 bench/bench.cpp                   # benchmark program
 bench/churn.cpp                   # octave churn benchmark (erase + insert)
 bench/octave.cpp                  # all workloads of Ankerl's octave benchmark
+bench/many_maps.cpp               # member layout: many small maps, scattered access
 BENCHMARK.md                      # benchmark results for all machines
 thirdparty/                       # comparison maps for the benchmark (not in git)
 ```
@@ -315,6 +318,40 @@ The map processes the hash in three steps.
 Fastrange is monotonic in the hash: a key has its home at the same
 relative position in a table of any size. The incremental growth relies on
 this (see "Growth memory").
+
+**Seed.** Iteration visits a table in hash order. Without a seed, a loop of
+`m2[kv.first] = kv.second` with no `reserve` sends the keys in sorted home
+order into a smaller table. They pile up at its start, and the loop takes
+quadratic time (14 s for 1M keys on the i5-3230M). So each table takes a
+32-bit seed at its first allocation, and its low 12 bits pick one of 4096
+mixers (`include/sflat/hash_mix.hpp`): `(x ^ T[j]) * M[i]`, from 64 xors T
+and 64 multipliers M that `tools/multipliers.cpp` searched and checked.
+
+- Xoring the seed into the input of one fixed multiplier is not enough. The
+  multiply is linear, so the home positions of two seeds differ by one of a few
+  offsets: in 300 random seed pairs, iterating 300k keys into a new map took
+  0.240 s at p99 (median 0.016 s), and seeds that differ in one bit were
+  quadratic again. It also spread keys with regular bits badly for some seeds
+  (`i * 1000`: 426 of 1024 groups for 2.4% of seeds). With the checked
+  multipliers the p99 is 0.026 s, and every mixer spreads 12 patterns of
+  regular keys like random hashes do.
+- Two tables with the same multiplier (seeds 64 apart in the counter) still
+  have related orders: the same loop can be up to 48x slower for 2M keys.
+- `find` is as fast as with one fixed multiplier, and so are inserts into a large
+  table; inserting 1000 sequential keys is about 8% slower.
+- The seed stays the same while a table grows, so the growth above still works.
+- It moves with the storage, so move and swap stay O(1) and need no rehash.
+  A copy takes the seed of its source, so it still writes in order.
+- It does not make the map safe against chosen keys: the mixer is not keyed,
+  and `std::hash` of an integer or a string has no seed.
+- Seeds of a process start at a random value (`getrandom` on Linux,
+  `arc4random` on macOS and the BSDs, else a stack address and the time). So
+  two tables with the same keys iterate in a different order, and the order
+  changes from run to run: code that depends on it fails early.
+- A table keeps the multiplier and the xor of its mixer (16 bytes), not the
+  seed, so hashing a key needs no table lookup. `max_load_factor_` is now a
+  `float` inside (the interface stays `double`) in the padding behind the hash,
+  equality and allocator members, so `sizeof` grows by 8 bytes (136 to 144).
 
 ### Overflow word (fast miss)
 
@@ -449,6 +486,8 @@ Define these before the include.
 | `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
 | `SFLAT_LAZY_OVERFLOW` | 1 with NEON, else 0 | 1: `find()` reads the overflow word only when no key in the home group matched. |
 | `SFLAT_FIND_NEXT_INLINE` | 1 with NEON, else 0 | 1: the probe of the group after the home group is inlined in `find()`. |
+| `SFLAT_NO_SEED` | 0 | 1: no per-table seed. The same keys iterate in the same order in every table and run. For debugging; inserting while iterating another table can take quadratic time. See "Seed". |
+| `SFLAT_PROCESS_SEED` | random | n: seeds start at n instead of a random value, so a run repeats. Tables still get different seeds. |
 
 ## API compatibility
 
