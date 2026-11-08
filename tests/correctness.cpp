@@ -260,8 +260,9 @@ void test_api_surface() {
     ++local_count;
   }
   CHECK(local_count >= 1);  // key 2 itself hashes to bucket bk
-  // bucket_size(n): open addressing, at most one element per slot n
-  CHECK(b.bucket_size(bk) <= 1);
+  // bucket_size(n): the elements with bucket(key) == n, as the local
+  // iterators visit them. Keys 2 and 3 can share a bucket.
+  CHECK(b.bucket_size(bk) == local_count);
   // load factor / max load factor
   CHECK(m9.load_factor() >= 0.0);
   const double old = m9.max_load_factor();

@@ -280,40 +280,40 @@ class flat_hash_set {
       : flat_hash_set(il, bucket_count, hash, KeyEqual(), alloc) {}
 
   flat_hash_set(const flat_hash_set& other)
-      : max_load_factor_(other.max_load_factor_),
-        hash_(other.hash_),
+      : hash_(other.hash_),
         equal_(other.equal_),
         slot_alloc_(slot_traits::select_on_container_copy_construction(
             other.slot_alloc_)),
         ctrl_alloc_(ctrl_traits::select_on_container_copy_construction(
-            other.ctrl_alloc_)) {
+            other.ctrl_alloc_)),
+        max_load_factor_(other.max_load_factor_) {
     copy_elements_from(other);
   }
 
   flat_hash_set(const flat_hash_set& other, const Allocator& alloc)
-      : max_load_factor_(other.max_load_factor_),
-        hash_(other.hash_),
+      : hash_(other.hash_),
         equal_(other.equal_),
         slot_alloc_(alloc),
-        ctrl_alloc_(alloc) {
+        ctrl_alloc_(alloc),
+        max_load_factor_(other.max_load_factor_) {
     copy_elements_from(other);
   }
 
   flat_hash_set(flat_hash_set&& other) noexcept
-      : max_load_factor_(other.max_load_factor_),
-        hash_(std::move(other.hash_)),
+      : hash_(std::move(other.hash_)),
         equal_(std::move(other.equal_)),
         slot_alloc_(std::move(other.slot_alloc_)),
-        ctrl_alloc_(std::move(other.ctrl_alloc_)) {
+        ctrl_alloc_(std::move(other.ctrl_alloc_)),
+        max_load_factor_(other.max_load_factor_) {
     steal_storage(other);
   }
 
   flat_hash_set(flat_hash_set&& other, const Allocator& alloc)
-      : max_load_factor_(other.max_load_factor_),
-        hash_(std::move(other.hash_)),
+      : hash_(std::move(other.hash_)),
         equal_(std::move(other.equal_)),
         slot_alloc_(alloc),
-        ctrl_alloc_(alloc) {
+        ctrl_alloc_(alloc),
+        max_load_factor_(other.max_load_factor_) {
     if (alloc == other.get_allocator()) {
       steal_storage(other);
     } else {
@@ -376,7 +376,7 @@ class flat_hash_set {
     swap(growth_left_, other.growth_left_);
     swap(max_load_factor_, other.max_load_factor_);
     swap(hash_, other.hash_);
-    swap(seed_, other.seed_);
+    swap(mix_, other.mix_);
     swap(equal_, other.equal_);
     swap(old_slots_, other.old_slots_);
     swap(old_ctrl_, other.old_ctrl_);
@@ -444,7 +444,7 @@ class flat_hash_set {
   // Precondition: *this is empty and has no storage.
   void copy_elements_from(const flat_hash_set& other) {
     if (other.size_ == 0) return;
-    seed_ = other.seed_;  // same order as other, so the writes stay sequential
+    mix_ = other.mix_;  // same order as other, so the writes stay sequential
     rehash_to(min_cap_for(other.size_));
     for_each_slot(other, [this](const value_type* s) { place_unique(*s); });
     size_ = other.size_;
@@ -454,7 +454,7 @@ class flat_hash_set {
   // Precondition: *this is empty and has no storage.
   void move_elements_from(flat_hash_set& other) {
     if (other.size_ == 0) return;
-    seed_ = other.seed_;
+    mix_ = other.mix_;
     rehash_to(min_cap_for(other.size_));
     for_each_slot(other,
                   [this](value_type* s) { place_unique(std::move(*s)); });
@@ -466,8 +466,8 @@ class flat_hash_set {
   // Take all storage of other (including an ongoing migration).
   // Precondition: *this has no storage.
   void steal_storage(flat_hash_set& other) noexcept {
-    seed_ = other.seed_;
-    other.seed_ = 0;
+    mix_ = other.mix_;
+    other.mix_ = detail::Mixer();
     slots_ = other.slots_;
     ctrl_ = other.ctrl_;
     overflow_ = other.overflow_;
@@ -621,7 +621,7 @@ class flat_hash_set {
   void destroy_slot(size_t i) noexcept { slot_at(i)->~value_type(); }
 
   uint64_t hash_mixed(const key_type& k) const {
-    return detail::HashKey(hash_, k, seed_);
+    return detail::HashKey(hash_, k, mix_);
   }
 
   // Element with key in the given table, or nullptr. A table with cap 0 must
@@ -1024,8 +1024,8 @@ class flat_hash_set {
   template <typename Construct>
   SFLAT_NOINLINE std::pair<iterator, bool> insert_with_growth(
       const key_type& key, uint64_t h, Construct& construct) {
-    if (seed_ == 0) {  // first allocation: h was computed without the seed
-      seed_ = detail::NextSeed();
+    if (!mix_.taken()) {  // first allocation: h was computed without a mixer
+      mix_ = detail::Mixer::Next();
       h = hash_mixed(key);
     }
     if (value_type* e = find_ptr(key, h)) return {iterator(this, e), false};
@@ -1415,7 +1415,7 @@ class flat_hash_set {
   // order and releases the old slots behind the cursor, so the peak stays
   // near the size of the new table.
   void rehash_to(size_t new_cap) {
-    if (seed_ == 0 && new_cap != 0) seed_ = detail::NextSeed();
+    if (!mix_.taken() && new_cap != 0) mix_ = detail::Mixer::Next();
     // If migrating, finish it first to avoid losing unmigrated elements.
     if (is_migrating()) finish_migration();
     check_capacity(new_cap);
@@ -1762,8 +1762,7 @@ class flat_hash_set {
   detail::Overflow* overflow_ = empty_overflow();  // size cap_/kWidth; per-group overflow Bloom bits
   size_type cap_ = 0;
   size_type size_ = 0;
-  uint32_t seed_ = 0;  // see detail::NextSeed(); 0 until the first allocation
-  float max_load_factor_ = static_cast<float>(kDefaultMaxLoadFactor);
+  detail::Mixer mix_;  // from the seed taken at the first allocation
   size_type growth_left_ = 0;  // see reset_growth_left()
   size_type deleted_ = 0;  // tombstones in the current table
   size_type limit_ = 0;    // load_limit() of the current table
@@ -1771,6 +1770,9 @@ class flat_hash_set {
   KeyEqual equal_;
   slot_alloc slot_alloc_;
   ctrl_alloc ctrl_alloc_;
+  // In the padding behind the (usually empty) members above. A float: the
+  // interface stays double.
+  float max_load_factor_ = static_cast<float>(kDefaultMaxLoadFactor);
   // Incremental rehash state: when growing, old table is migrated to new
   // in small steps to avoid latency spikes.
   slot_type* old_slots_ = nullptr;

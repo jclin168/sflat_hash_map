@@ -336,7 +336,8 @@ and 64 multipliers M that `tools/multipliers.cpp` searched and checked.
   regular keys like random hashes do.
 - Two tables with the same multiplier (seeds 64 apart in the counter) still
   have related orders: the same loop can be up to 48x slower for 2M keys.
-- `find` is as fast as with one fixed multiplier; inserts are up to 8% slower.
+- `find` is as fast as with one fixed multiplier, and so are inserts into a large
+  table; inserting 1000 sequential keys is about 8% slower.
 - The seed stays the same while a table grows, so the growth above still works.
 - It moves with the storage, so move and swap stay O(1) and need no rehash.
   A copy takes the seed of its source, so it still writes in order.
@@ -346,8 +347,10 @@ and 64 multipliers M that `tools/multipliers.cpp` searched and checked.
   `arc4random` on macOS and the BSDs, else a stack address and the time). So
   two tables with the same keys iterate in a different order, and the order
   changes from run to run: code that depends on it fails early.
-- It shares 8 bytes with `max_load_factor_`, now a `float` inside (the interface
-  stays `double`), so `sizeof` does not change.
+- A table keeps the multiplier and the xor of its mixer (16 bytes), not the
+  seed, so hashing a key needs no table lookup. `max_load_factor_` is now a
+  `float` inside (the interface stays `double`) in the padding behind the hash,
+  equality and allocator members, so `sizeof` grows by 8 bytes (136 to 144).
 
 ### Overflow word (fast miss)
 

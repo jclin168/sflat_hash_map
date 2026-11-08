@@ -88,18 +88,16 @@ inline uint32_t ProcessSeed() noexcept {
 #endif
 }
 
-// Never 0: 0 means "not taken yet". The step is odd, so the low 12 bits, which
-// pick the mixer (see SeededMixHash), differ for any 4096 seeds in a row.
+// The step is odd, so the low 12 bits, which pick the mixer (see Mixer),
+// differ for any 4096 seeds in a row.
 inline uint32_t NextSeed() noexcept {
   static const uint32_t process_seed = ProcessSeed();  // thread-safe init
   static std::atomic<uint32_t> counter{0};
-  const uint32_t s =
-      process_seed +
-      (counter.fetch_add(1, std::memory_order_relaxed) + 1) * 0x9E3779B1U;
-  return s ? s : 1U << 12;  // same mixer as 0
+  return process_seed +
+         (counter.fetch_add(1, std::memory_order_relaxed) + 1) * 0x9E3779B1U;
 }
 
-// Mixers for seeds: SeededMixHash(x, s) is MixHash with kSeedXors[j] xored
+// Mixers for seeds: the mixer of seed s is MixHash with kSeedXors[j] xored
 // into x and kSeedMultipliers[i] as the multiplier, i = s & 63 and
 // j = (s >> 6) & 63, so 4096 mixers. Generated and checked by
 // tools/multipliers.cpp; see there for the exact checks.
@@ -120,8 +118,10 @@ inline uint32_t NextSeed() noexcept {
 // multipliers scale home positions differently, which breaks the runs, and
 // no two of them pile up in a simulation of the loop above; and any two xors
 // differ in at least 4 bits in every 16-bit window and 6 in every 24-bit
-// window, for two tables with the same multiplier. Two tables with the same
-// mixer (seeds 4096 apart in the counter) still give the slow loop.
+// window, meant for two tables with the same multiplier. That does not make
+// them independent (the xor is linear too): two tables with the same
+// multiplier (seeds 64 apart in the counter) can still be up to 48x slower in
+// the loop above for 2M keys.
 inline constexpr uint64_t kSeedMultipliers[64] = {
     0x0D4B319EDA031F8BULL, 0x65A2B787AA30CCFDULL, 0x0C66DA0B973385E7ULL,
     0x72C9740CC5A0CFFBULL, 0x25BB4294913885FFULL, 0x9A5198F40558F107ULL,
@@ -171,21 +171,43 @@ inline constexpr uint64_t kSeedXors[64] = {
     0xCC96F21C606B1B21ULL,
 };
 
-inline uint64_t SeededMixHash(uint64_t x, uint32_t seed) noexcept {
+// The mixer of a table, kept in the table so that hashing a key needs no
+// table lookup. mul is odd once taken, so mul == 0 means "not taken yet":
+// then every key hashes to 0, which is fine since the table is empty.
+struct Mixer {
+  uint64_t mul = 0;
+  uint64_t xr = 0;
+
+  static Mixer ForSeed(uint32_t seed) noexcept {
 #if SFLAT_NO_SEED
-  (void)seed;
-  return MixHash(x);
+    (void)seed;
+    return {0x9E3779B97F4A7C15ULL, 0};  // MixHash
 #else
-  const __uint128_t r = (__uint128_t)(x ^ kSeedXors[(seed >> 6) & 63]) *
-                        kSeedMultipliers[seed & 63];
-  return (uint64_t)r ^ (uint64_t)(r >> 64);
+    return {kSeedMultipliers[seed & 63], kSeedXors[(seed >> 6) & 63]};
 #endif
+  }
+  static Mixer Next() noexcept { return ForSeed(NextSeed()); }
+
+  bool taken() const noexcept { return mul != 0; }
+
+  uint64_t operator()(uint64_t x) const noexcept {
+#if SFLAT_NO_SEED
+    return MixHash(x);  // a constant multiplier, no loads
+#else
+    const __uint128_t r = (__uint128_t)(x ^ xr) * mul;
+    return (uint64_t)r ^ (uint64_t)(r >> 64);
+#endif
+  }
+};
+
+inline uint64_t SeededMixHash(uint64_t x, uint32_t seed) noexcept {
+  return Mixer::ForSeed(seed)(x);
 }
 
-// Mixed hash of key k in a table with the given seed.
+// Mixed hash of key k in a table with the given mixer.
 template <typename Hash, typename Key>
-inline uint64_t HashKey(const Hash& hash, const Key& k, uint32_t seed) {
-  return SeededMixHash(static_cast<uint64_t>(hash(k)), seed);
+inline uint64_t HashKey(const Hash& hash, const Key& k, const Mixer& mix) {
+  return mix(static_cast<uint64_t>(hash(k)));
 }
 
 }  // namespace detail
