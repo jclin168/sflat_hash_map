@@ -11,7 +11,10 @@
 // The insert loop stores into the map, and the address of that store is known
 // only after the lookup, so the cache misses of successive calls do not
 // overlap as they do for find: inserts here cost about 4x as much as finds,
-// with any map.
+// with any map. perf on the i5-3230M: about 6.4 misses in flight for find,
+// 1.35 for m[k] = v and for find(k)->second = v; a store of the found value
+// to an address known in advance keeps 6.1, and try_emplace of a present key
+// (the insert path without the store) 6.2.
 //
 // Build: g++ -std=c++17 -O3 -march=native -DSFLAT_PROCESS_SEED=1
 //        -Iinclude bench/many_maps.cpp

@@ -1763,11 +1763,14 @@ class flat_hash_set {
   // those it reads. find reads the same table members, the overflow words
   // and old_cap_ (migrating?), but no growth_left_ or size_.
   //
-  // Measured on the i5-3230M (insert and find in 131072 maps of 12 keys,
-  // scattered, so the map object misses the cache): 2.5% faster inserts than
-  // with size_ next to cap_ and the mixer behind it; with old_cap_ moved
-  // before growth_left_ for find instead, inserts were 3% slower and finds
-  // no faster (the adjacent-line prefetcher fetches the second line anyway).
+  // Measured on the i5-3230M with perf (bench/many_maps.cpp: 131072 maps of
+  // 12 keys, scattered, so the map object misses the cache). A find has about
+  // 6 cache misses in flight, so a second line of the object costs no time:
+  // with old_cap_ at byte 112 a find missed 0.26 more lines and took as long.
+  // A loop that stores through the found element (m[k] = v) has about 1.4 in
+  // flight, so each line costs: 3.46 load misses and 887 cycles per call here,
+  // 3.70 and 930 with old_cap_ at byte 112, 3.74 and 930 with growth_left_
+  // and size_ behind old_cap_ (all of find in one line).
   detail::Mixer mix_;  // from the seed taken at the first allocation
   uint8_t* ctrl_ = empty_ctrl();  // size cap_; H2 / kEmpty / kDeleted
   slot_type* slots_ = nullptr;
