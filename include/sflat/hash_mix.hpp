@@ -15,6 +15,13 @@
 //   SFLAT_PROCESS_SEED=n  seeds start at n instead of a random value, so a
 //                         run repeats (iteration order, benchmarks). Tables
 //                         still get different seeds.
+//   SFLAT_LAZY_SEED=1     every table starts with MixHash, as with
+//                         SFLAT_NO_SEED, and takes a seed only when the
+//                         safety net of the map finds its keys piling up.
+//                         As fast as SFLAT_NO_SEED and as safe as the
+//                         default, but the same keys iterate in the same
+//                         order in every table and run (until a table takes
+//                         a seed).
 
 #include <atomic>
 #include <chrono>
@@ -22,6 +29,12 @@
 
 #if !defined(SFLAT_NO_SEED)
 #define SFLAT_NO_SEED 0
+#endif
+#if !defined(SFLAT_LAZY_SEED)
+#define SFLAT_LAZY_SEED 0
+#endif
+#if SFLAT_NO_SEED && SFLAT_LAZY_SEED
+#error "SFLAT_NO_SEED and SFLAT_LAZY_SEED exclude each other"
 #endif
 
 #if !defined(SFLAT_PROCESS_SEED)
@@ -1502,6 +1515,14 @@ struct Mixer {
     return {0x9E3779B97F4A7C15ULL};  // MixHash
 #else
     return {kSeedMultipliers[seed & 4095]};
+#endif
+  }
+  // The mixer of a new table, and the next one after the safety net.
+  static Mixer First() noexcept {
+#if SFLAT_LAZY_SEED
+    return {0x9E3779B97F4A7C15ULL};  // MixHash until the safety net fires
+#else
+    return Next();
 #endif
   }
   static Mixer Next() noexcept { return ForSeed(NextSeed()); }

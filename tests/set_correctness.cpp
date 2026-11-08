@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <iterator>
 #include <random>
@@ -557,6 +558,53 @@ void test_safety_net() {
   std::printf("test_safety_net OK (%.3f s)\n", took.count());
 }
 
+// A single-pass iterator over a vector (see tests/correctness.cpp).
+template <typename T>
+struct InputOnly {
+  using iterator_category = std::input_iterator_tag;
+  using value_type = T;
+  using difference_type = std::ptrdiff_t;
+  using pointer = const T*;
+  using reference = const T&;
+  const T* p;
+  reference operator*() const { return *p; }
+  InputOnly& operator++() { ++p; return *this; }
+  InputOnly operator++(int) { InputOnly t = *this; ++p; return t; }
+  bool operator==(const InputOnly& o) const { return p == o.p; }
+  bool operator!=(const InputOnly& o) const { return p != o.p; }
+};
+
+// insert(first, last) makes room first for forward iterators, as in the map.
+void test_range_insert() {
+  using S = sflat::flat_hash_set<uint64_t>;
+  const uint64_t n = 500000;
+  S a;
+  for (uint64_t i = 0; i < n; ++i) a.insert(i * 3);
+  const auto start = std::chrono::steady_clock::now();
+  S b(a.begin(), a.end());
+  const std::chrono::duration<double> took =
+      std::chrono::steady_clock::now() - start;
+  CHECK(took.count() < 0.5);
+  CHECK(b == a);
+  const size_t bc = b.bucket_count();
+  b.insert(a.begin(), a.end());
+  b.insert(b.begin(), b.end());
+  CHECK(b.bucket_count() == bc && b == a);
+  S r;
+  r.reserve(100000);
+  const size_t rbc = r.bucket_count();
+  const std::vector<uint64_t> few = {1, 2, 3};
+  r.insert(few.begin(), few.end());
+  CHECK(r.bucket_count() == rbc && r.size() == 3);
+  std::vector<uint64_t> v;
+  for (uint64_t i = 0; i < 1000; ++i) v.push_back(i % 700);
+  S in;
+  in.insert(InputOnly<uint64_t>{v.data()}, InputOnly<uint64_t>{v.data() + v.size()});
+  CHECK(in.size() == 700);
+  for (uint64_t k = 0; k < 700; ++k) CHECK(in.count(k) == 1);
+  std::printf("test_range_insert OK (%.3f s)\n", took.count());
+}
+
 int main() {
   test_api_surface();
   test_random_ops();
@@ -570,6 +618,7 @@ int main() {
   test_erase_others_while_iterating();
   test_iterate_and_insert();
   test_safety_net();
+  test_range_insert();
   std::printf("ALL SET TESTS PASSED\n");
   return 0;
 }

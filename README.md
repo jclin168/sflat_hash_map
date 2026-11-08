@@ -349,6 +349,14 @@ multipliers of the mixer (`include/sflat/hash_mix.hpp`), which
 - `find` and inserts are as fast as with one fixed multiplier for large
   tables; inserting 1000 sequential keys is about 8% slower than with the
   golden-ratio multiplier, which spreads them almost perfectly.
+- `insert(first, last)` and the range constructor make room for the range
+  first when the iterators are forward iterators: `M b(a.begin(), a.end())`
+  then does not pile up in any mode (300k keys with `SFLAT_NO_SEED`: 1.5 s
+  before, 0.006 s now). They reserve `max(size(), n)`, not `size() + n`, so
+  keys already present do not grow the table.
+- `SFLAT_LAZY_SEED=1` keeps the golden-ratio multiplier until the safety net
+  fires, for tables that are filled and looked up: the speed of
+  `SFLAT_NO_SEED`, without its quadratic cases. See "Configuration macros".
 - The seed stays the same while a table grows, so the growth above still works.
 - It moves with the storage, so move and swap stay O(1) and need no rehash.
   A copy takes the seed of its source, so it still writes in order.
@@ -497,6 +505,7 @@ Define these before the include.
 | `SFLAT_FIND_NEXT_INLINE` | 1 with NEON, else 0 | 1: the probe of the group after the home group is inlined in `find()`. |
 | `SFLAT_NO_SEED` | 0 | 1: no per-table seed and no safety net. The same keys iterate in the same order in every table and run. For debugging, or for tables whose keys never come from another table's iteration order; inserting while iterating another table can take quadratic time. See "Seed". |
 | `SFLAT_PROCESS_SEED` | random | n: seeds start at n instead of a random value, so a run repeats. Tables still get different seeds. |
+| `SFLAT_LAZY_SEED` | 0 | 1: every table starts with the golden-ratio multiplier, as with `SFLAT_NO_SEED`, and takes a seed only when the safety net finds its keys piling up. As fast as `SFLAT_NO_SEED` (it spreads sequential keys almost perfectly) and as safe as the default, but the same keys iterate in the same order in every table and run. Not with `SFLAT_NO_SEED`. |
 
 ## API compatibility
 

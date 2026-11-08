@@ -1517,7 +1517,7 @@ class flat_hash_map {
       const key_type& key, uint64_t h, Construct& construct,
       bool reseed_first = false) {
     if (!mix_.taken()) {  // first allocation: h was computed without a mixer
-      mix_ = detail::Mixer::Next();
+      mix_ = detail::Mixer::First();
       h = hash_mixed(key);
     }
     if (value_type* e = find_ptr(key, h)) return {iterator(this, e), false};
@@ -1961,7 +1961,7 @@ class flat_hash_map {
   // order and releases the old slots behind the cursor, so the peak stays
   // near the size of the new table.
   void rehash_to(size_t new_cap) {
-    if (!mix_.taken() && new_cap != 0) mix_ = detail::Mixer::Next();
+    if (!mix_.taken() && new_cap != 0) mix_ = detail::Mixer::First();
     // If migrating, finish it first to avoid losing unmigrated elements.
     if (is_migrating()) finish_migration();
     check_capacity(new_cap);
@@ -2125,6 +2125,18 @@ class flat_hash_map {
 
   template <typename InputIt>
   void insert(InputIt first, InputIt last) {
+    // With forward iterators, make room for the range first: fewer growths,
+    // and no pile-up when the range is in the home order of a table with the
+    // same mixer (another table's iteration, or a dump of one; the total
+    // probes of linear probing do not depend on the order once there is
+    // room). max(size, n), not size + n: keys already present would grow
+    // the table for nothing. A range of this table itself has n <= size, so
+    // it never reallocates under its own iterators.
+    using category = typename std::iterator_traits<InputIt>::iterator_category;
+    if constexpr (std::is_base_of<std::forward_iterator_tag, category>::value) {
+      const size_type n = static_cast<size_type>(std::distance(first, last));
+      if (n > size_ && min_cap_for(n) > cap_) rehash(n);
+    }
     for (; first != last; ++first) insert(*first);
   }
 

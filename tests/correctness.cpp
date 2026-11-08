@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <random>
 #include <stdexcept>
@@ -465,6 +466,106 @@ void test_safety_net() {
               took.count(), took_c.count());
 }
 
+// A single-pass iterator over a vector: insert(first, last) cannot count it
+// first, so it must still insert one by one.
+template <typename T>
+struct InputOnly {
+  using iterator_category = std::input_iterator_tag;
+  using value_type = T;
+  using difference_type = std::ptrdiff_t;
+  using pointer = const T*;
+  using reference = const T&;
+  const T* p;
+  reference operator*() const { return *p; }
+  InputOnly& operator++() { ++p; return *this; }
+  InputOnly operator++(int) { InputOnly t = *this; ++p; return t; }
+  bool operator==(const InputOnly& o) const { return p == o.p; }
+  bool operator!=(const InputOnly& o) const { return p != o.p; }
+};
+
+// insert(first, last) and the range constructor make room first for forward
+// iterators. A range in another table's iteration order then does not pile
+// up even without a seed (before: 1.5 s for 300k keys with SFLAT_NO_SEED).
+void test_range_insert() {
+  using M = sflat::flat_hash_map<uint64_t, uint64_t>;
+  const uint64_t n = 500000;
+  M a;
+  for (uint64_t i = 0; i < n; ++i) a[i] = i * 3;
+  const auto start = std::chrono::steady_clock::now();
+  M b(a.begin(), a.end());
+  const std::chrono::duration<double> took =
+      std::chrono::steady_clock::now() - start;
+  CHECK(took.count() < 0.5);
+  CHECK(b == a);
+  // Room for max(size, n): keys already present do not grow the table.
+  const size_t bc = b.bucket_count();
+  b.insert(a.begin(), a.end());
+  CHECK(b.bucket_count() == bc && b == a);
+  // A range of the table itself: no reallocation under its own iterators.
+  b.insert(b.begin(), b.end());
+  CHECK(b.bucket_count() == bc && b == a);
+  // Never shrinks: a short range into a reserved table.
+  M r;
+  r.reserve(100000);
+  const size_t rbc = r.bucket_count();
+  std::vector<std::pair<uint64_t, uint64_t>> few = {{1, 1}, {2, 2}, {3, 3}};
+  r.insert(few.begin(), few.end());
+  CHECK(r.bucket_count() == rbc && r.size() == 3);
+  // Overlapping keys: new ones are added, present ones keep their value.
+  M o{{1, 100}, {5, 500}};
+  o.insert(few.begin(), few.end());
+  CHECK(o.size() == 4 && o.at(1) == 100 && o.at(2) == 2 && o.at(5) == 500);
+  // Input iterators: no count, still correct.
+  std::vector<std::pair<uint64_t, uint64_t>> v;
+  for (uint64_t i = 0; i < 1000; ++i) v.push_back({i % 700, i});
+  M in;
+  in.insert(InputOnly<std::pair<uint64_t, uint64_t>>{v.data()},
+            InputOnly<std::pair<uint64_t, uint64_t>>{v.data() + v.size()});
+  CHECK(in.size() == 700);
+  bool first_wins = true;
+  for (uint64_t k = 0; k < 700; ++k) first_wins = first_wins && in.at(k) == k;
+  CHECK(first_wins);
+  M ctor(InputOnly<std::pair<uint64_t, uint64_t>>{v.data()},
+         InputOnly<std::pair<uint64_t, uint64_t>>{v.data() + v.size()});
+  CHECK(ctor == in);
+  std::printf("test_range_insert OK (%.3f s)\n", took.count());
+}
+
+// Iteration order across tables in the three seed modes. Default: each
+// table its own multiplier, so the same keys iterate in a different order.
+// SFLAT_NO_SEED and SFLAT_LAZY_SEED: MixHash everywhere, the same order;
+// with SFLAT_LAZY_SEED a table whose keys pile up takes a seed and then
+// iterates differently.
+void test_seed_modes() {
+  using M = sflat::flat_hash_map<uint64_t, uint64_t>;
+  const uint64_t n = 300000;
+  M a, b;
+  for (uint64_t i = 0; i < n; ++i) a[i] = i;
+  for (uint64_t i = 0; i < n; ++i) b[i] = i;
+  const auto same_order = [](const M& x, const M& y) {
+    return x.bucket_count() == y.bucket_count() &&
+           std::equal(x.begin(), x.end(), y.begin(), y.end());
+  };
+#if SFLAT_NO_SEED || SFLAT_LAZY_SEED
+  CHECK(same_order(a, b));
+#else
+  CHECK(!same_order(a, b));
+#endif
+  // Keys in a's order, one by one, into a new table: piles up without a seed.
+  M c;
+  const auto start = std::chrono::steady_clock::now();
+  for (const auto& kv : a) c.insert(kv);
+  const std::chrono::duration<double> took =
+      std::chrono::steady_clock::now() - start;
+  CHECK(c == a);
+#if !SFLAT_NO_SEED
+  CHECK(took.count() < 0.5);  // with SFLAT_LAZY_SEED: the safety net fired
+#endif
+  std::printf("test_seed_modes OK (%s, %.3f s)\n",
+              SFLAT_NO_SEED ? "no seed" : SFLAT_LAZY_SEED ? "lazy seed" : "seed",
+              took.count());
+}
+
 // Operations that run while an incremental migration is in progress.
 // Each case fills a map until a growth migration has just started, so most
 // elements are still in the old table.
@@ -876,6 +977,8 @@ int main() {
   test_sequential_keys();
   test_hash_bits_structured_keys();
   test_safety_net();
+  test_range_insert();
+  test_seed_modes();
   test_during_migration();
   test_self_aliasing();
   test_large_mixed();
