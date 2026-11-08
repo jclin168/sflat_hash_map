@@ -326,10 +326,12 @@ before the mixer. The same loop then takes 1.0 s for 10M keys.
 - The seed stays the same while a table grows, so the growth above still works.
 - It moves with the storage, so move and swap stay O(1) and need no rehash.
   A copy takes the seed of its source, so it still writes in order.
-- It does not make the map safe against chosen keys. Seeds come from a counter,
-  not from a random source.
-- Two tables with the same keys can iterate in a different order, and with
-  several threads the order can change from run to run.
+- It does not make the map safe against chosen keys: the mixer is not keyed,
+  and `std::hash` of an integer or a string has no seed.
+- Seeds of a process start at a random value (`getrandom` on Linux,
+  `arc4random` on macOS and the BSDs, else a stack address and the time). So
+  two tables with the same keys iterate in a different order, and the order
+  changes from run to run: code that depends on it fails early.
 - It shares 8 bytes with `max_load_factor_`, now a `float` inside (the interface
   stays `double`), so `sizeof` does not change.
 

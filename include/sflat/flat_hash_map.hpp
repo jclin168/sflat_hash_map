@@ -31,6 +31,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -43,6 +44,18 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<sys/random.h>)
+#include <sys/random.h>
+#define SFLAT_HAS_GETRANDOM 1
+#endif
+#endif
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+#include <stdlib.h>  // arc4random
+#define SFLAT_HAS_ARC4RANDOM 1
+#endif
 
 // SIMD back end for group probing (define SFLAT_NO_SIMD=1 to force the
 // portable one):
@@ -228,10 +241,33 @@ inline uint64_t MixHash(uint64_t x) noexcept {
 // is monotonic. So without a seed, inserting while iterating another table
 // sends the keys in sorted home order into a smaller table: they pile up at
 // its start, and a loop of m2[kv.first] = kv.second without reserve() takes
-// quadratic time. Never 0: 0 means "not taken yet".
+// quadratic time.
+//
+// The seeds of a process start at a random value, so iteration order also
+// changes from run to run and code that depends on it fails early.
+inline uint32_t ProcessSeed() noexcept {
+  uint32_t s = 0;
+#if defined(SFLAT_HAS_GETRANDOM)
+  if (getrandom(&s, sizeof s, GRND_NONBLOCK) != static_cast<ssize_t>(sizeof s))
+    s = 0;
+#elif defined(SFLAT_HAS_ARC4RANDOM)
+  s = arc4random();
+#endif
+  if (s == 0) {  // no system random source: a stack address (ASLR) and the time
+    const uint64_t t = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    s = static_cast<uint32_t>(MixHash(reinterpret_cast<uintptr_t>(&s) ^ t));
+  }
+  return s;
+}
+
+// Never 0: 0 means "not taken yet".
 inline uint32_t NextSeed() noexcept {
+  static const uint32_t process_seed = ProcessSeed();  // thread-safe init
   static std::atomic<uint32_t> counter{0};
-  return ((counter.fetch_add(1, std::memory_order_relaxed) + 1) * 0x9E3779B1U) | 1U;
+  return (process_seed +
+          (counter.fetch_add(1, std::memory_order_relaxed) + 1) * 0x9E3779B1U) |
+         1U;
 }
 
 // 32-bit Lemire fastrange: maps h uniformly into [0, n) with a single
