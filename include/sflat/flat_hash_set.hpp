@@ -621,7 +621,7 @@ class flat_hash_set {
   void destroy_slot(size_t i) noexcept { slot_at(i)->~value_type(); }
 
   uint64_t hash_mixed(const key_type& k) const {
-    return detail::MixHash(static_cast<uint64_t>(hash_(k)) ^ seed_);
+    return detail::HashKey(hash_, k, seed_);
   }
 
   // Element with key in the given table, or nullptr. A table with cap 0 must

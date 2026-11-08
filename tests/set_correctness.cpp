@@ -436,6 +436,10 @@ void test_erase_others_while_iterating() {
 // table has its own seed, so iteration order is not the home order of another
 // table. The seed moves with the storage. (1M keys took 14 s without a seed.)
 void test_iterate_and_insert() {
+#if SFLAT_NO_SEED
+  std::printf("test_iterate_and_insert skipped (SFLAT_NO_SEED)\n");
+  return;
+#endif
   using M = sflat::flat_hash_set<uint64_t>;
   std::mt19937_64 r(42);
   M a;

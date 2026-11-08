@@ -2,7 +2,8 @@
 // Copyright 2026 Jian-Cheng Lin
 // Searches and checks the two tables of the seeded mixer:
 //   h = r ^ (r >> 64),  r = (x ^ T[j]) * M[i]   (128-bit product)
-// where the seed of a table picks i and j: 64 x 64 = 4096 mixers.
+// where the seed of a table picks i and j: 64 x 64 = 4096 mixers. The output
+// replaces kSeedMultipliers and kSeedXors in include/sflat/hash_mix.hpp.
 //
 // T: with one multiplier, the inputs of a key under T[a] and T[b] differ by
 // one of 2^p values, p = bits of T[a] ^ T[b] inside the bits that vary

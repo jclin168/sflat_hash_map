@@ -22,16 +22,14 @@
 //    in place. Iteration is a plain linear scan.
 //  * The user hash is passed through a single-multiply mixer so the map
 //    stays robust even with weak hashes (e.g. std::hash<uint64_t> identity on
-//    sequential keys).
+//    sequential keys). Each table picks its mixer by a seed (hash_mix.hpp).
 //
 // Layout: one control byte per slot (SwissTable-style: H2 in [0,0xFD],
 // 0xFF = empty, 0xFE = deleted) stored in a dense array, a separate slot array
 // (std::pair<const Key, T> in aligned raw storage), and one overflow Bloom
 // word per group (SFLAT_OVERFLOW_BITS, default 32).
 
-#include <atomic>
 #include <cassert>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -45,17 +43,7 @@
 #include <type_traits>
 #include <utility>
 
-#if defined(__linux__) && defined(__has_include)
-#if __has_include(<sys/random.h>)
-#include <sys/random.h>
-#define SFLAT_HAS_GETRANDOM 1
-#endif
-#endif
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
-    defined(__NetBSD__)
-#include <stdlib.h>  // arc4random
-#define SFLAT_HAS_ARC4RANDOM 1
-#endif
+#include "hash_mix.hpp"
 
 // SIMD back end for group probing (define SFLAT_NO_SIMD=1 to force the
 // portable one):
@@ -216,59 +204,6 @@ struct EmptyCtrl {
   }
 };
 inline constexpr EmptyCtrl kEmptyCtrl{};
-
-// Single-multiply avalanche mixer, boost-style mulx64:
-//   (x * C) ^ ((x * C) >> 64),  C = 2^64/phi (golden ratio).
-// One 128-bit multiply instead of a splitmix64 finalizer (which needs two
-// *dependent* 64-bit multiplies): much shorter critical path, while still
-// robust against weak hashes such as std::hash<uint64_t> identity on
-// sequential keys.
-//
-// Do not drop the high half (a plain 64-bit x * C). In a 64-bit product,
-// bit k depends only on bits [0, k] of x. Then H2 (bits [0,8)) depends only
-// on the low 8 bits of the key, and the overflow bit only on the low 13
-// bits. Keys with regular low bits (aligned pointers, i << 8, i * 64) then
-// share a few H2 values or one, and a find compares many keys: up to 10x
-// slower. The xor of the high half makes every output bit depend on every
-// key bit.
-inline uint64_t MixHash(uint64_t x) noexcept {
-  const __uint128_t r = (__uint128_t)x * 0x9E3779B97F4A7C15ULL;
-  return (uint64_t)r ^ (uint64_t)(r >> 64);
-}
-
-// Seed of a map or set, taken at its first allocation and xored into the user
-// hash before MixHash. Iteration visits a table in hash order, and Fastrange
-// is monotonic. So without a seed, inserting while iterating another table
-// sends the keys in sorted home order into a smaller table: they pile up at
-// its start, and a loop of m2[kv.first] = kv.second without reserve() takes
-// quadratic time.
-//
-// The seeds of a process start at a random value, so iteration order also
-// changes from run to run and code that depends on it fails early.
-inline uint32_t ProcessSeed() noexcept {
-  uint32_t s = 0;
-#if defined(SFLAT_HAS_GETRANDOM)
-  if (getrandom(&s, sizeof s, GRND_NONBLOCK) != static_cast<ssize_t>(sizeof s))
-    s = 0;
-#elif defined(SFLAT_HAS_ARC4RANDOM)
-  s = arc4random();
-#endif
-  if (s == 0) {  // no system random source: a stack address (ASLR) and the time
-    const uint64_t t = static_cast<uint64_t>(
-        std::chrono::steady_clock::now().time_since_epoch().count());
-    s = static_cast<uint32_t>(MixHash(reinterpret_cast<uintptr_t>(&s) ^ t));
-  }
-  return s;
-}
-
-// Never 0: 0 means "not taken yet".
-inline uint32_t NextSeed() noexcept {
-  static const uint32_t process_seed = ProcessSeed();  // thread-safe init
-  static std::atomic<uint32_t> counter{0};
-  return (process_seed +
-          (counter.fetch_add(1, std::memory_order_relaxed) + 1) * 0x9E3779B1U) |
-         1U;
-}
 
 // 32-bit Lemire fastrange: maps h uniformly into [0, n) with a single
 // 32x32->64 IMUL (1 uop, no implicit registers). A 128-bit multiply here
@@ -1156,7 +1091,7 @@ class flat_hash_map {
   void destroy_slot(size_t i) noexcept { slot_at(i)->~value_type(); }
 
   uint64_t hash_mixed(const key_type& k) const {
-    return detail::MixHash(static_cast<uint64_t>(hash_(k)) ^ seed_);
+    return detail::HashKey(hash_, k, seed_);
   }
 
   // Element with key in the given table, or nullptr. A table with cap 0 must

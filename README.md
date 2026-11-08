@@ -176,13 +176,15 @@ is fine too:
 ## File structure
 
 ```
-include/sflat/flat_hash_map.hpp   # the map (the only header a map needs)
+include/sflat/flat_hash_map.hpp   # the map
 include/sflat/flat_hash_set.hpp   # the set (includes flat_hash_map.hpp)
+include/sflat/hash_mix.hpp        # hash mixer and seeds (included by both)
 tests/correctness.cpp             # correctness tests (map)
 tests/set_correctness.cpp         # correctness tests (set)
 tests/map_interface.cpp           # std::unordered_map interface tests (map)
 tests/set_interface.cpp           # std::unordered_set interface tests (set)
 tests/growth_tiers.cpp            # growth factor tests
+tools/multipliers.cpp             # search and checks of the seed mixers
 bench/bench.cpp                   # benchmark program
 bench/churn.cpp                   # octave churn benchmark (erase + insert)
 bench/octave.cpp                  # all workloads of Ankerl's octave benchmark
@@ -320,9 +322,21 @@ this (see "Growth memory").
 `m2[kv.first] = kv.second` with no `reserve` sends the keys in sorted home
 order into a smaller table. They pile up at its start, and the loop takes
 quadratic time (14 s for 1M keys on the i5-3230M). So each table takes a
-32-bit seed at its first allocation, and the seed is xored into the user hash
-before the mixer. The same loop then takes 1.0 s for 10M keys.
+32-bit seed at its first allocation, and its low 12 bits pick one of 4096
+mixers (`include/sflat/hash_mix.hpp`): `(x ^ T[j]) * M[i]`, from 64 xors T
+and 64 multipliers M that `tools/multipliers.cpp` searched and checked.
 
+- Xoring the seed into the input of one fixed multiplier is not enough. The
+  multiply is linear, so the home positions of two seeds differ by one of a few
+  offsets: in 300 random seed pairs, iterating 300k keys into a new map took
+  0.240 s at p99 (median 0.016 s), and seeds that differ in one bit were
+  quadratic again. It also spread keys with regular bits badly for some seeds
+  (`i * 1000`: 426 of 1024 groups for 2.4% of seeds). With the checked
+  multipliers the p99 is 0.026 s, and every mixer spreads 12 patterns of
+  regular keys like random hashes do.
+- Two tables with the same multiplier (seeds 64 apart in the counter) still
+  have related orders: the same loop can be up to 48x slower for 2M keys.
+- `find` is as fast as with one fixed multiplier; inserts are up to 8% slower.
 - The seed stays the same while a table grows, so the growth above still works.
 - It moves with the storage, so move and swap stay O(1) and need no rehash.
   A copy takes the seed of its source, so it still writes in order.
@@ -468,6 +482,8 @@ Define these before the include.
 | `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
 | `SFLAT_LAZY_OVERFLOW` | 1 with NEON, else 0 | 1: `find()` reads the overflow word only when no key in the home group matched. |
 | `SFLAT_FIND_NEXT_INLINE` | 1 with NEON, else 0 | 1: the probe of the group after the home group is inlined in `find()`. |
+| `SFLAT_NO_SEED` | 0 | 1: no per-table seed. The same keys iterate in the same order in every table and run. For debugging; inserting while iterating another table can take quadratic time. See "Seed". |
+| `SFLAT_PROCESS_SEED` | random | n: seeds start at n instead of a random value, so a run repeats. Tables still get different seeds. |
 
 ## API compatibility
 
