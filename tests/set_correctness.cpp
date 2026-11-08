@@ -518,6 +518,45 @@ void test_iterate_and_insert() {
   std::printf("test_iterate_and_insert OK\n");
 }
 
+// Safety net of the seed, as in tests/correctness.cpp: b = a, then clear
+// and shrink, so b keeps the multiplier of a; the keys of a then pile up in
+// b until a long probe gives b a new seed. String keys, with erases.
+void test_safety_net() {
+#if SFLAT_NO_SEED
+  std::printf("test_safety_net skipped (SFLAT_NO_SEED)\n");
+  return;
+#endif
+  using S = sflat::flat_hash_set<std::string>;
+  const uint64_t n = 500000;
+  S a;
+  for (uint64_t i = 0; i < n; ++i) a.insert(std::to_string(i * 7));
+  S b = a;
+  b.clear();
+  b.rehash(0);
+  std::vector<std::string> erased;
+  std::string prev;
+  uint64_t k = 0;
+  const auto start = std::chrono::steady_clock::now();
+  for (const auto& x : a) {
+    b.insert(x);
+    if (++k % 64 == 0) {
+      b.erase(prev);
+      erased.push_back(prev);
+    }
+    prev = x;
+  }
+  const std::chrono::duration<double> took =
+      std::chrono::steady_clock::now() - start;
+  CHECK(took.count() < 1.0);
+  CHECK(b.size() == n - erased.size());
+  CHECK(static_cast<size_t>(std::distance(b.begin(), b.end())) == b.size());
+  for (const auto& x : erased) CHECK(b.find(x) == b.end());
+  size_t found = 0;
+  for (const auto& x : a) found += b.count(x);
+  CHECK(found == b.size());
+  std::printf("test_safety_net OK (%.3f s)\n", took.count());
+}
+
 int main() {
   test_api_surface();
   test_random_ops();
@@ -530,6 +569,7 @@ int main() {
   test_churn_fixed_size();
   test_erase_others_while_iterating();
   test_iterate_and_insert();
+  test_safety_net();
   std::printf("ALL SET TESTS PASSED\n");
   return 0;
 }

@@ -398,69 +398,71 @@ void test_hash_bits_structured_keys() {
   std::printf("test_hash_bits_structured_keys OK\n");
 }
 
-// Keys of table A, in A's iteration order (its home order), go into a table
-// B with half as many slots, up to load 0.8, with linear probing: the
-// growth step where m2[kv.first] = kv.second piles up when the orders of
-// the two seeds are related. Returns the mean probe length: about 3 for
-// independent orders, thousands for shifted ones.
-double seed_pair_probes(uint64_t (*key)(uint64_t), uint32_t seed_a,
-                        uint32_t seed_b) {
-  using sflat::detail::Fastrange;
-  using sflat::detail::SeededMixHash;
-  const size_t n = 1 << 15, cap = n / 2, inserts = cap * 4 / 5;
-  std::vector<std::pair<uint32_t, uint64_t>> order(n);
-  for (size_t i = 0; i < n; ++i)
-    order[i] = {static_cast<uint32_t>(SeededMixHash(key(i), seed_a) >> 32), key(i)};
-  std::sort(order.begin(), order.end());
-  std::vector<bool> used(cap);
-  uint64_t probes = 0;
-  for (size_t i = 0; i < inserts; ++i) {
-    size_t s = Fastrange(SeededMixHash(order[i].second, seed_b), cap);
-    while (used[s]) s = s + 1 == cap ? 0 : s + 1, ++probes;
-    used[s] = true;
-    ++probes;
-  }
-  return static_cast<double>(probes) / inserts;
-}
-
-// Seed pairs whose orders were related with a seed xored into the input of
-// one multiplier: seeds that differ in one bit, and seeds next to each other
-// in the counter of NextSeed. Pairs with the same multiplier (seed & 63) are
-// skipped: the xor cannot make their orders independent (see
-// SeededMixHash). The simulation is harsher than the map: the worst pair
-// below (16.8 probes) is within 2x of the usual time in the map.
-void test_seed_pairs() {
+// Safety net of the seed (reseed() in flat_hash_map.hpp). b = a, then clear
+// and shrink: b keeps the multiplier of a, so the keys of a arrive in b's
+// own home order and pile up at the start of the smaller table, until an
+// insert that probes too far gives b a new seed. Without the safety net the
+// loop takes about 4 s for 500k keys (63 s for 2M); with it about 0.1 s.
+// Erases during the loop leave tombstones for the rebuild, and the values are
+// strings, so the rebuild moves non-trivial elements.
+void test_safety_net() {
 #if SFLAT_NO_SEED
-  std::printf("test_seed_pairs skipped (SFLAT_NO_SEED)\n");
+  std::printf("test_safety_net skipped (SFLAT_NO_SEED)\n");
   return;
 #endif
-  uint64_t (*const keys[])(uint64_t) = {
-      [](uint64_t i) { return i; },
-      [](uint64_t i) { return i * 1000; },
-      [](uint64_t i) -> uint64_t { return 0x7f0000000000ull + i * 16; },
-      [](uint64_t i) { return i << 32; },
-  };
-  std::vector<std::pair<uint32_t, uint32_t>> pairs;
-  const uint32_t base[] = {0x9E3779B1u, 0x12345678u, 0xDEADBEEFu};
-  for (uint32_t s : base)
-    for (int b = 0; b < 12; ++b) pairs.push_back({s, s ^ (1u << b)});
-  for (uint32_t s : base)
-    for (uint32_t c = 1; c <= 8; ++c)
-      pairs.push_back({s + c * 0x9E3779B1u, s + (c + 1) * 0x9E3779B1u});
-  std::mt19937 r(7);
-  for (int i = 0; i < 32; ++i) pairs.push_back({r(), r()});
-  double worst = 0;
-  for (const auto& sp : pairs) {
-    if (((sp.first ^ sp.second) & 63) == 0) continue;  // same multiplier
-    for (auto key : keys) {
-      const double p = seed_pair_probes(key, sp.first, sp.second);
-      if (p > 20)
-        std::printf("  seeds %08x %08x: %.1f probes\n", sp.first, sp.second, p);
-      worst = std::max(worst, p);
+  using M = sflat::flat_hash_map<uint64_t, std::string>;
+  const uint64_t n = 500000;
+  M a;
+  for (uint64_t i = 0; i < n; ++i) a[i * 7] = std::to_string(i);
+  M b = a;
+  b.clear();
+  b.rehash(0);
+  std::vector<uint64_t> erased;
+  uint64_t prev = 0, k = 0;
+  const auto start = std::chrono::steady_clock::now();
+  for (const auto& kv : a) {
+    b[kv.first] = kv.second;
+    if (++k % 64 == 0) {
+      b.erase(prev);
+      erased.push_back(prev);
+    }
+    prev = kv.first;
+  }
+  const std::chrono::duration<double> took =
+      std::chrono::steady_clock::now() - start;
+  CHECK(took.count() < 1.0);
+  CHECK(b.size() == n - erased.size());
+  CHECK(static_cast<size_t>(std::distance(b.begin(), b.end())) == b.size());
+  for (uint64_t x : erased) CHECK(b.find(x) == b.end());
+  size_t found = 0;
+  for (const auto& kv : a) {
+    auto it = b.find(kv.first);
+    if (it != b.end()) {
+      CHECK(it->second == kv.second);
+      ++found;
     }
   }
-  CHECK(worst <= 20);
-  std::printf("test_seed_pairs OK (worst %.1f probes)\n", worst);
+  CHECK(found == b.size());
+
+  // A hash that collides by itself: every insert probes past the others, and
+  // no seed helps. The safety net rebuilds at most once until the table
+  // doubles, so the inserts stay O(n) probes each, as without it.
+  struct ConstHash {
+    size_t operator()(uint64_t) const { return 42; }
+  };
+  sflat::flat_hash_map<uint64_t, uint64_t, ConstHash> c;
+  const uint64_t nc = 10000;
+  const auto start_c = std::chrono::steady_clock::now();
+  for (uint64_t i = 0; i < nc; ++i) c[i] = i;
+  const std::chrono::duration<double> took_c =
+      std::chrono::steady_clock::now() - start_c;
+  CHECK(took_c.count() < 5.0);
+  CHECK(c.size() == nc);
+  bool all = true;
+  for (uint64_t i = 0; i < nc; ++i) all = all && c.find(i) != c.end() && c.at(i) == i;
+  CHECK(all);
+  std::printf("test_safety_net OK (%.3f s, constant hash %.3f s)\n",
+              took.count(), took_c.count());
 }
 
 // Operations that run while an incremental migration is in progress.
@@ -873,7 +875,7 @@ int main() {
   test_growth_factor();
   test_sequential_keys();
   test_hash_bits_structured_keys();
-  test_seed_pairs();
+  test_safety_net();
   test_during_migration();
   test_self_aliasing();
   test_large_mixed();
