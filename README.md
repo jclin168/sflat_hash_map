@@ -324,21 +324,39 @@ this (see "Growth memory").
 order into a smaller table. They pile up at its start, and the loop takes
 quadratic time (14 s for 1M keys on the i5-3230M). So each table takes a
 32-bit seed at its first allocation, and its low 12 bits pick one of 4096
-mixers (`include/sflat/hash_mix.hpp`): `(x ^ T[j]) * M[i]`, from 64 xors T
-and 64 multipliers M that `tools/multipliers.cpp` searched and checked.
+multipliers of the mixer (`include/sflat/hash_mix.hpp`), which
+`tools/multipliers.cpp` searched: each spreads 12 patterns of regular keys
+(sequential IDs, aligned pointers, shifted IDs) like random hashes do.
 
 - Xoring the seed into the input of one fixed multiplier is not enough. The
   multiply is linear, so the home positions of two seeds differ by one of a few
   offsets: in 300 random seed pairs, iterating 300k keys into a new map took
   0.240 s at p99 (median 0.016 s), and seeds that differ in one bit were
   quadratic again. It also spread keys with regular bits badly for some seeds
-  (`i * 1000`: 426 of 1024 groups for 2.4% of seeds). With the checked
-  multipliers the p99 is 0.026 s, and every mixer spreads 12 patterns of
-  regular keys like random hashes do.
-- Two tables with the same multiplier (seeds 64 apart in the counter) still
-  have related orders: the same loop can be up to 48x slower for 2M keys.
-- `find` is as fast as with one fixed multiplier, and so are inserts into a large
-  table; inserting 1000 sequential keys is about 8% slower.
+  (`i * 1000`: 426 of 1024 groups for 2.4% of seeds). Two different
+  multipliers give independent orders: 300 random pairs took 0.033 s at p99.
+- Safety net: two tables with the same multiplier (seeds 4096 apart in the
+  counter, by chance, or `b = a; b.clear(); b.rehash(0);`) have related orders
+  again. An insert that probes more than 4096 slots past its home group (more
+  at a max load factor above 0.875) then gives the table a new seed and
+  rebuilds it in place at the same size. The loop above then takes 0.026 s
+  for 300k keys instead of 1.55 s, and 0.17 s for 2M. Random keys probe at
+  most about 1050 slots at 50M keys, and none of the usual workloads
+  (random, sequential and strided keys, churn, max load factors up to 0.98)
+  triggered it. At most once until the table doubles, so a hash that
+  collides by itself costs O(1) rebuilds per element. Like a growth, the
+  rebuild invalidates iterators and references.
+- `find` and inserts are as fast as with one fixed multiplier for large
+  tables; inserting 1000 sequential keys is about 8% slower than with the
+  golden-ratio multiplier, which spreads them almost perfectly.
+- `insert(first, last)` and the range constructor make room for the range
+  first when the iterators are forward iterators: `M b(a.begin(), a.end())`
+  then does not pile up in any mode (300k keys with `SFLAT_NO_SEED`: 1.5 s
+  before, 0.006 s now). They reserve `max(size(), n)`, not `size() + n`, so
+  keys already present do not grow the table.
+- `SFLAT_LAZY_SEED=1` keeps the golden-ratio multiplier until the safety net
+  fires, for tables that are filled and looked up: the speed of
+  `SFLAT_NO_SEED`, without its quadratic cases. See "Configuration macros".
 - The seed stays the same while a table grows, so the growth above still works.
 - It moves with the storage, so move and swap stay O(1) and need no rehash.
   A copy takes the seed of its source, so it still writes in order.
@@ -348,10 +366,9 @@ and 64 multipliers M that `tools/multipliers.cpp` searched and checked.
   `arc4random` on macOS and the BSDs, else a stack address and the time). So
   two tables with the same keys iterate in a different order, and the order
   changes from run to run: code that depends on it fails early.
-- A table keeps the multiplier and the xor of its mixer (16 bytes), not the
-  seed, so hashing a key needs no table lookup. `max_load_factor_` is now a
-  `float` inside (the interface stays `double`) in the padding behind the hash,
-  equality and allocator members, so `sizeof` grows by 8 bytes (136 to 144).
+- A table keeps its multiplier, not the seed, so hashing a key needs no
+  table lookup. `max_load_factor_` is a `float` inside (the interface stays
+  `double`) in the padding behind the hash, equality and allocator members.
 
 ### Overflow word (fast miss)
 
@@ -486,8 +503,9 @@ Define these before the include.
 | `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
 | `SFLAT_LAZY_OVERFLOW` | 1 with NEON, else 0 | 1: `find()` reads the overflow word only when no key in the home group matched. |
 | `SFLAT_FIND_NEXT_INLINE` | 1 with NEON, else 0 | 1: the probe of the group after the home group is inlined in `find()`. |
-| `SFLAT_NO_SEED` | 0 | 1: no per-table seed. The same keys iterate in the same order in every table and run. For debugging; inserting while iterating another table can take quadratic time. See "Seed". |
+| `SFLAT_NO_SEED` | 0 | 1: no per-table seed and no safety net. The same keys iterate in the same order in every table and run. For debugging, or for tables whose keys never come from another table's iteration order; inserting while iterating another table can take quadratic time. See "Seed". |
 | `SFLAT_PROCESS_SEED` | random | n: seeds start at n instead of a random value, so a run repeats. Tables still get different seeds. |
+| `SFLAT_LAZY_SEED` | 0 | 1: every table starts with the golden-ratio multiplier, as with `SFLAT_NO_SEED`, and takes a seed only when the safety net finds its keys piling up. As fast as `SFLAT_NO_SEED` (it spreads sequential keys almost perfectly) and as safe as the default, but the same keys iterate in the same order in every table and run. Not with `SFLAT_NO_SEED`. |
 
 ## API compatibility
 

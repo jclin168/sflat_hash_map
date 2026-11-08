@@ -64,6 +64,14 @@ class flat_hash_set {
       kWidth * kWidth;
   // Old slots migrated per insert during growth.
   static constexpr size_t kMigrateBatch = 64;  // multiple of kWidth
+  // Safety net: an insert that probes more slots than this past its home
+  // group gives the table a new seed (see reseed()), at the default max load
+  // factor; see reseed_probe() for higher ones. Random keys probe at most
+  // about 750 slots at 10M keys and 1050 at 50M, growing like log n; a table
+  // whose keys arrive in the home order of its own mixer (iterating a table
+  // with the same multiplier) probes one slot more per insert, so it crosses
+  // this after about 4096 inserts.
+  static constexpr size_t kReseedProbe = 4096;
   // With std::allocator the set uses detail::PageAlloc (THP, page release).
   static constexpr bool kOwnMemory =
       std::is_same<Allocator, std::allocator<value_type>>::value;
@@ -377,6 +385,7 @@ class flat_hash_set {
     swap(max_load_factor_, other.max_load_factor_);
     swap(hash_, other.hash_);
     swap(mix_, other.mix_);
+    swap(reseed_size_, other.reseed_size_);
     swap(equal_, other.equal_);
     swap(old_slots_, other.old_slots_);
     swap(old_ctrl_, other.old_ctrl_);
@@ -468,6 +477,8 @@ class flat_hash_set {
   void steal_storage(flat_hash_set& other) noexcept {
     mix_ = other.mix_;
     other.mix_ = detail::Mixer();
+    reseed_size_ = other.reseed_size_;
+    other.reseed_size_ = 0;
     slots_ = other.slots_;
     ctrl_ = other.ctrl_;
     overflow_ = other.overflow_;
@@ -997,6 +1008,12 @@ class flat_hash_set {
           if (me || (!may_spill && dst != cap_)) break;
         }
       }
+#if !SFLAT_NO_SEED
+      if (SFLAT_UNLIKELY(GroupsPast(dst / kWidth, home, ng) * kWidth >
+                         kReseedProbe) &&
+          may_reseed(GroupsPast(dst / kWidth, home, ng) * kWidth))
+        return insert_with_growth(key, h, construct, true);
+#endif
       value_type* e = cur_slot(dst);
       construct(static_cast<void*>(e));
       const bool reused = ctrl_[dst] == detail::kDeleted;
@@ -1021,11 +1038,14 @@ class flat_hash_set {
   // the key up, then build the value in a temporary, then prepare the table.
   // Costs one more lookup and move, only on this path. As a bonus the table is
   // untouched if construction throws.
+  // With reseed, the slow path found a probe too long (see kReseedProbe): the
+  // table takes a new seed instead of growing.
   template <typename Construct>
   SFLAT_NOINLINE std::pair<iterator, bool> insert_with_growth(
-      const key_type& key, uint64_t h, Construct& construct) {
+      const key_type& key, uint64_t h, Construct& construct,
+      bool reseed_first = false) {
     if (!mix_.taken()) {  // first allocation: h was computed without a mixer
-      mix_ = detail::Mixer::Next();
+      mix_ = detail::Mixer::First();
       h = hash_mixed(key);
     }
     if (value_type* e = find_ptr(key, h)) return {iterator(this, e), false};
@@ -1035,9 +1055,27 @@ class flat_hash_set {
       value_type* v;
       ~Temp() { v->~value_type(); }
     } tmp{std::launder(reinterpret_cast<value_type*>(buf))};
-    prepare_insert_slow();
-    const Probe p = locate_for_insert(*tmp.v, h);
+    if (reseed_first) {
+      reseed();
+      h = hash_mixed(*tmp.v);
+    } else {
+      prepare_insert_slow();
+    }
+    Probe p = locate_for_insert(*tmp.v, h);
     assert(!p.found);
+#if !SFLAT_NO_SEED
+    if (!reseed_first && p.idx < cap_) {
+      const size_t ng = cap_ / kWidth;
+      const size_t home = detail::Fastrange(h, ng);
+      if (SFLAT_UNLIKELY(GroupsPast(p.idx / kWidth, home, ng) * kWidth >
+                         kReseedProbe) &&
+          may_reseed(GroupsPast(p.idx / kWidth, home, ng) * kWidth)) {
+        reseed();
+        h = hash_mixed(*tmp.v);
+        p = locate_for_insert(*tmp.v, h);
+      }
+    }
+#endif
     ::new (static_cast<void*>(slot_at(p.idx))) value_type(std::move(*tmp.v));
     commit_insert(p.idx, h);
     reset_growth_left();
@@ -1324,6 +1362,42 @@ class flat_hash_set {
     }
   }
 
+  // Safety net of the seed. Iteration visits a table in home order, so the
+  // keys of a table with the same multiplier (seeds 4096 apart, or by chance;
+  // see detail::Mixer) arrive in the home order of this one and pile up at
+  // the start of a smaller table: each insert probes one slot more, and the
+  // loop takes quadratic time. Inserts that probe more than kReseedProbe
+  // slots past their home group then give the table a new seed and rebuild
+  // it in place at the same size, so its order no longer follows the other
+  // table. 2M keys: 62.7 s with the same multiplier and no safety net.
+  //
+  // At most once until the table doubles, so a hash that collides by itself
+  // (no seed helps) costs O(1) rebuilds per element. The rebuild moves
+  // elements: it invalidates iterators and references, like a growth.
+  bool may_reseed(size_t probe) const noexcept {
+    return probe > reseed_probe() && size_ >= 2 * reseed_size_;
+  }
+  // kReseedProbe, scaled for a max load factor above the default. Probes of
+  // random keys grow about like 1 / (1 - load)^2: the longest at 10M keys
+  // was 1296 slots at 0.9, 4560 at 0.95 and 17984 at 0.98, against 6400,
+  // 25600 and 160000 here.
+  size_t reseed_probe() const noexcept {
+    const double f = (1 - kDefaultMaxLoadFactor) / (1 - max_load_factor_);
+    return f > 1 ? static_cast<size_t>(kReseedProbe * f * f) : kReseedProbe;
+  }
+  // Groups from home on to group g, wrapping around the ng groups.
+  static size_t GroupsPast(size_t g, size_t home, size_t ng) noexcept {
+    return g >= home ? g - home : g + ng - home;
+  }
+
+  void reseed() {
+    if (is_migrating()) finish_migration();
+    const uint64_t old = mix_.mul;
+    for (int i = 0; i < 4 && mix_.mul == old; ++i) mix_ = detail::Mixer::Next();
+    reseed_size_ = size_ ? size_ : 1;
+    drop_tombstones();  // re-places every element with the new mixer
+  }
+
   // Rebuild the table at the same size and in place, to remove the
   // tombstones (as abseil's DropDeletesWithoutResize). rehash_to(cap_) would
   // allocate and touch a whole new table each time, and when erases and
@@ -1415,7 +1489,7 @@ class flat_hash_set {
   // order and releases the old slots behind the cursor, so the peak stays
   // near the size of the new table.
   void rehash_to(size_t new_cap) {
-    if (!mix_.taken() && new_cap != 0) mix_ = detail::Mixer::Next();
+    if (!mix_.taken() && new_cap != 0) mix_ = detail::Mixer::First();
     // If migrating, finish it first to avoid losing unmigrated elements.
     if (is_migrating()) finish_migration();
     check_capacity(new_cap);
@@ -1568,6 +1642,18 @@ class flat_hash_set {
 
   template <typename InputIt>
   void insert(InputIt first, InputIt last) {
+    // With forward iterators, make room for the range first: fewer growths,
+    // and no pile-up when the range is in the home order of a table with the
+    // same mixer (another table's iteration, or a dump of one; the total
+    // probes of linear probing do not depend on the order once there is
+    // room). max(size, n), not size + n: keys already present would grow
+    // the table for nothing. A range of this table itself has n <= size, so
+    // it never reallocates under its own iterators.
+    using category = typename std::iterator_traits<InputIt>::iterator_category;
+    if constexpr (std::is_base_of<std::forward_iterator_tag, category>::value) {
+      const size_type n = static_cast<size_type>(std::distance(first, last));
+      if (n > size_ && min_cap_for(n) > cap_) rehash(n);
+    }
     for (; first != last; ++first) insert(*first);
   }
 
@@ -1781,6 +1867,7 @@ class flat_hash_set {
   size_type old_cap_ = 0;  // != 0 while migrating; see the members below
   size_type deleted_ = 0;  // tombstones in the current table
   size_type limit_ = 0;    // load_limit() of the current table
+  size_type reseed_size_ = 0;  // size_ at the last reseed(); see may_reseed()
   Hash hash_;
   KeyEqual equal_;
   slot_alloc slot_alloc_;
