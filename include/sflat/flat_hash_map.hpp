@@ -138,6 +138,40 @@
 #define SFLAT_LIKELY(x) (x)
 #define SFLAT_UNLIKELY(x) (x)
 #endif
+
+// Code that must have no branch (see mark_erased_cur()). C++ cannot force
+// this; the compiler can make a branch of arithmetic and the other way round.
+// Two tools help, and tools/check_branchless.py checks the output:
+//  * SFLAT_OPAQUE(x): an empty asm statement (no instruction) after which the
+//    compiler does not know the value of x. So it cannot see that x is 0 or
+//    1, and it cannot make a branch of the arithmetic on x again.
+//  * SFLAT_UNPREDICTABLE(c): the condition c is close to random. Clang then
+//    uses a select (cmov) and does not make a branch of it again. For gcc it
+//    is a probability of 0.5, only a hint.
+#if defined(__GNUC__) || defined(__clang__)
+#define SFLAT_OPAQUE(x) __asm__("" : "+r"(x))
+#else
+#define SFLAT_OPAQUE(x) static_cast<void>(0)
+#endif
+#if defined(__clang__)
+#define SFLAT_UNPREDICTABLE(c) __builtin_unpredictable(!!(c))
+#elif defined(__GNUC__)
+#define SFLAT_UNPREDICTABLE(c) __builtin_expect_with_probability(!!(c), 1, 0.5)
+#else
+#define SFLAT_UNPREDICTABLE(c) (!!(c))
+#endif
+// Markers around branchless code for tools/check_branchless.py. Empty unless
+// SFLAT_CHECK_BRANCHLESS is defined (the markers stop the compiler from
+// moving memory accesses across them, so they are for the check only).
+#if defined(SFLAT_CHECK_BRANCHLESS) && (defined(__GNUC__) || defined(__clang__))
+#define SFLAT_BRANCHLESS_BEGIN() \
+  __asm__ volatile("# sflat-branchless-begin" ::: "memory")
+#define SFLAT_BRANCHLESS_END() \
+  __asm__ volatile("# sflat-branchless-end" ::: "memory")
+#else
+#define SFLAT_BRANCHLESS_BEGIN() static_cast<void>(0)
+#define SFLAT_BRANCHLESS_END() static_cast<void>(0)
+#endif
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
@@ -2187,13 +2221,17 @@ class flat_hash_map {
   // At 10M entries (Xeon) erase by key took 30 to 39 ns, against 48 to 55
   // with the tombstone limit test and reset_growth_left() here.
   //
-  // Slot i (< cap_) of the current table; has_empty is 0 or 1.
-  void mark_erased_cur(size_t i, size_t has_empty) noexcept {
+  // Slot i (< cap_) of the current table; empty: Match(kEmpty) of its group.
+  void mark_erased_cur(size_t i, Mask empty) noexcept {
     static_assert(detail::kEmpty == detail::kDeleted + 1, "control values");
+    SFLAT_BRANCHLESS_BEGIN();
+    size_t has_empty = empty != 0;
+    SFLAT_OPAQUE(has_empty);  // not known to be 0 or 1: no branch on it
     --size_;
     ctrl_[i] = static_cast<uint8_t>(detail::kDeleted + has_empty);
     deleted_ += 1 - has_empty;
     growth_left_ += has_empty & (0 - static_cast<size_t>(growth_left_ != 0));
+    SFLAT_BRANCHLESS_END();
   }
 
   // Slot i of either table.
@@ -2203,8 +2241,8 @@ class flat_hash_map {
       old_ctrl_[i - cap_] = detail::kDeleted;
       return;
     }
-    mark_erased_cur(
-        i, Group::Load(ctrl_ + i / kWidth * kWidth).Match(detail::kEmpty) != 0);
+    const Group g = Group::Load(ctrl_ + i / kWidth * kWidth);
+    mark_erased_cur(i, g.Match(detail::kEmpty));
   }
 
   // --------------------------------------------------------------- modifiers
@@ -2386,7 +2424,7 @@ class flat_hash_map {
         value_type* const e = cur_slot(i);
         if (equal_(e->first, key)) {
           e->~value_type();
-          mark_erased_cur(i, g.Match(detail::kEmpty) != 0);
+          mark_erased_cur(i, g.Match(detail::kEmpty));
           return 1;
         }
         m &= m - 1;

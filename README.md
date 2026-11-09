@@ -185,6 +185,8 @@ tests/map_interface.cpp           # std::unordered_map interface tests (map)
 tests/set_interface.cpp           # std::unordered_set interface tests (set)
 tests/growth_tiers.cpp            # growth factor tests
 tools/multipliers.cpp             # search and checks of the seed mixers
+tools/check_branchless.py         # checks that marked code has no branch
+tools/branchless_check.cpp        # the code that check_branchless.py compiles
 bench/bench.cpp                   # benchmark program
 bench/churn.cpp                   # octave churn benchmark (erase + insert)
 bench/octave.cpp                  # all workloads of Ankerl's octave benchmark
@@ -643,6 +645,26 @@ All tests pass on each back end:
 | SSE2 | `-msse4.2` (no AVX2) on x86-64 Linux, also with ASan and UBSan; `clang++ -arch x86_64` under Rosetta 2 |
 | NEON | Apple M2, macOS 26.6, Apple clang 21, also with ASan and UBSan |
 | SWAR | `-DSFLAT_NO_SIMD=1` on x86-64 Linux and on Apple M2, also with ASan and UBSan |
+
+### Branchless code
+
+Some code must have no branch, for example the erase marking: its values
+are known only after the find's memory load, and a mispredict there throws
+away the work of the next operations. C++ cannot force this, and a
+compiler can make a branch of a `?:` or of arithmetic. So this code is
+between `SFLAT_BRANCHLESS_BEGIN()` and `SFLAT_BRANCHLESS_END()`, and
+`SFLAT_OPAQUE(x)` hides from the optimizer that a value is 0 or 1. Check
+the compiler output after a change of this code or a new compiler:
+
+```bash
+tools/check_branchless.py                          # g++ and clang++
+tools/check_branchless.py aarch64-linux-gnu-g++    # AArch64 (NEON) cross compiler
+```
+
+The script compiles `tools/branchless_check.cpp` to assembly for several
+flag sets (`-O2`, `-O3`, `-march=native`, x86-64-v3, armv8.2-a, Apple M1,
+SWAR) and fails if a marked region has a conditional branch. It found the
+branch that gcc 13 made of the old `?:` in `mark_erased()`.
 
 The churn change (erase to empty, in-place tombstone removal) was tested
 with AVX2, SSE2 and SWAR on x86-64 Linux, with ASan and UBSan. It was not

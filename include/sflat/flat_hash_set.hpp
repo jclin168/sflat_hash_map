@@ -1685,13 +1685,18 @@ class flat_hash_set {
   // migration skips it).
   // Erase marking: see mark_erased_cur() in flat_hash_map.hpp. No branches
   // on has_empty or deleted_; the insert slow path checks the tombstone
-  // limit. Slot i (< cap_) of the current table; has_empty is 0 or 1.
-  void mark_erased_cur(size_t i, size_t has_empty) noexcept {
+  // limit. Slot i (< cap_) of the current table; empty: Match(kEmpty) of its
+  // group.
+  void mark_erased_cur(size_t i, Mask empty) noexcept {
     static_assert(detail::kEmpty == detail::kDeleted + 1, "control values");
+    SFLAT_BRANCHLESS_BEGIN();
+    size_t has_empty = empty != 0;
+    SFLAT_OPAQUE(has_empty);  // not known to be 0 or 1: no branch on it
     --size_;
     ctrl_[i] = static_cast<uint8_t>(detail::kDeleted + has_empty);
     deleted_ += 1 - has_empty;
     growth_left_ += has_empty & (0 - static_cast<size_t>(growth_left_ != 0));
+    SFLAT_BRANCHLESS_END();
   }
 
   // Slot i of either table.
@@ -1701,8 +1706,8 @@ class flat_hash_set {
       old_ctrl_[i - cap_] = detail::kDeleted;
       return;
     }
-    mark_erased_cur(
-        i, Group::Load(ctrl_ + i / kWidth * kWidth).Match(detail::kEmpty) != 0);
+    const Group g = Group::Load(ctrl_ + i / kWidth * kWidth);
+    mark_erased_cur(i, g.Match(detail::kEmpty));
   }
 
   // --------------------------------------------------------------- modifiers
@@ -1818,7 +1823,7 @@ class flat_hash_set {
         value_type* const e = cur_slot(i);
         if (equal_(*e, key)) {
           e->~value_type();
-          mark_erased_cur(i, g.Match(detail::kEmpty) != 0);
+          mark_erased_cur(i, g.Match(detail::kEmpty));
           return 1;
         }
         m &= m - 1;
