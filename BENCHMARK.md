@@ -3,11 +3,12 @@
 This file has the benchmark results for all machines. The design of the map
 is in the [README](README.md).
 
-The benchmark has been run on four machines:
+The benchmark has been run on five machines:
 
 | CPU | Memory | sflat back end | Sizes |
 |---|---|---|---|
 | [Intel Xeon @ 2.10 GHz](#intel-xeon) | 15 GiB | AVX2 | 1M, 10M, 100M |
+| [Intel Xeon @ 2.30 GHz (AVX-512)](#intel-xeon--230-ghz-avx-512) | 15 GiB | AVX2 | 1M, 10M, 100M |
 | [Intel Celeron N5105 @ 2.00 GHz](#intel-celeron-n5105) | 7 GiB | SSE2 (no AVX2) | 1M, 10M, 50M |
 | [Intel Core i5-3230M @ 2.60 GHz](#intel-core-i5-3230m) | 15 GiB | SSE2 (no AVX2) | 1M, 10M, 100M |
 | [Apple M2 @ 3.49 GHz](#apple-m2) | 16 GiB | NEON | 1M, 10M, 100M |
@@ -544,6 +545,131 @@ What remains, and why:
 
 Run it: `POINTS=20 ./build/octave 1000 32000 500000` (`ONLY=hit,miss` runs
 some workloads only).
+
+## Intel Xeon @ 2.30 GHz (AVX-512)
+
+### Test environment
+
+| Item | Value |
+|------|-------|
+| CPU | Intel Xeon @ 2.30 GHz, 4 vCPUs, AVX2 and AVX-512, L2 2 MiB per core, L3 504 MiB |
+| Memory | 15 GiB |
+| OS | Ubuntu 24.04 (cloud VM, THP `madvise`) |
+| Compiler | g++ 13.3.0, `-O3 -march=native -std=c++17 -DNDEBUG` |
+
+- Code: commit d77af38 (the erase change below). sflat uses its AVX2
+  groups (32 control bytes); it has no AVX-512 path.
+- Comparison targets: emhash8 (801d02a), boost::unordered_flat_map and
+  boost::unordered_map (Boost 1.83), absl::flat_hash_map and
+  absl::node_hash_map (Abseil LTS 20260817.0), std::unordered_map
+  (libstdc++ 13).
+- The L3 of this CPU (504 MiB) holds the 1M and 10M tables of all maps.
+  Thus the 10M rows here are mostly cache hits, not DRAM accesses as on the
+  other machines.
+- This VM is shared with other workloads. The same binary gives times that
+  are different by 1.5x to 4x from run to run (see "Erase" below). The
+  tables are one run of `./build/bench 1000000 10000000 100000000`.
+  Compare the maps in the same table only.
+
+### Results
+
+Lower is better. **Bold** is the best value in the row.
+
+**n = 1,000,000**
+
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | **18.5** | 35.0 | 25.3 | 115.9 | 32.7 | 67.1 | 162.5 |
+| find hit (insert order) | **8.9** | 9.7 | 10.4 | 22.5 | 12.4 | 21.1 | 35.5 |
+| find hit (random order) | 9.8 | 13.9 | **9.2** | 21.6 | 10.6 | 32.1 | 38.9 |
+| find miss | 5.8 | 10.3 | **4.8** | 18.1 | 8.8 | 16.9 | 51.8 |
+| erase | **14.2** | 21.5 | 15.4 | 52.1 | 40.2 | 50.4 | 108.4 |
+| iterate | 2.4 | **0.6** | 10.0 | 18.6 | 10.4 | 22.2 | 35.9 |
+| insert (no reserve) | 55.0 | 100.2 | 47.2 | 191.2 | **46.0** | 116.6 | 190.9 |
+| bytes/entry (steady) | **21.5** | 34.0 | 34.8 | 46.7 | 37.0 | 52.2 | 41.8 |
+| bytes/entry (growth peak) | 40.7 | **36.2** | 51.2 | 46.7 | 54.3 | 58.4 | 45.1 |
+
+**n = 10,000,000**
+
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | **25.8** | 69.4 | 30.0 | 194.9 | 51.0 | 127.8 | 234.4 |
+| find hit (insert order) | **23.7** | 27.3 | 27.2 | 49.2 | 31.1 | 26.2 | 53.4 |
+| find hit (random order) | **25.7** | 38.6 | 26.6 | 71.4 | 31.9 | 40.7 | 69.0 |
+| find miss | 14.6 | 21.4 | **11.1** | 72.3 | 22.1 | 26.2 | 78.7 |
+| erase | 33.8 | 67.2 | **31.7** | 164.6 | 61.4 | 130.1 | 273.8 |
+| iterate | 6.0 | **1.0** | 10.1 | 48.4 | 9.2 | 22.6 | 97.5 |
+| insert (no reserve) | 55.7 | 134.0 | 66.3 | 330.1 | **53.0** | 144.0 | 401.4 |
+| bytes/entry (steady) | **20.0** | 29.5 | 27.0 | 42.8 | 28.7 | 47.2 | 40.4 |
+| bytes/entry (growth peak) | 30.1 | **29.6** | 40.4 | 42.8 | 42.9 | 47.2 | 41.8 |
+
+**n = 100,000,000**
+
+| Operation | sflat | emhash8 | boost_flat | boost_node | absl_flat | absl_node | std |
+|---|---|---|---|---|---|---|---|
+| insert (reserved) | **47.4** | 92.4 | 57.0 | 288.7 | 76.5 | 156.1 | 338.4 |
+| find hit (insert order) | **35.7** | 37.1 | 46.3 | 60.6 | 39.3 | 37.7 | 80.0 |
+| find hit (random order) | **40.9** | 47.2 | 48.0 | 98.3 | 43.8 | 76.6 | 83.6 |
+| find miss | 30.7 | **25.3** | 26.3 | 96.4 | 44.0 | 53.4 | 114.8 |
+| erase | **55.5** | 79.4 | 62.9 | 174.1 | 77.4 | 134.8 | 253.1 |
+| iterate | 4.8 | **1.2** | 9.8 | 46.8 | 8.7 | 27.3 | 129.5 |
+| insert (no reserve) | **58.4** | 180.4 | 75.3 | 401.1 | 75.4 | 232.0 | 545.8 |
+| bytes/entry (steady) | **19.6** | 26.7 | 21.5 | 40.6 | 22.8 | 44.1 | 40.1 |
+| bytes/entry (growth peak) | **23.8** | 26.8 | 32.2 | 40.6 | 34.2 | 44.1 | 40.1 |
+
+- sflat is the fastest on insert (reserved) and find hit at all three
+  sizes, and on insert (no reserve) at 100M. It uses the least memory in
+  steady state at all sizes.
+- boost_flat is faster on find miss at 1M and 10M (4.8 against 5.8 ns,
+  11.1 against 14.6 ns), and emhash8 at 100M.
+- absl_flat is faster on insert (no reserve) at 1M and 10M. At 1M and 10M
+  sflat grows 2x and migrates in steps (see "Insert latency during growth"
+  in the Intel Xeon section).
+
+### Erase: the change of commit d77af38
+
+Before this change, erase was the row with the largest gap to boost_flat:
+at 10M, sflat erase took about 2 times its find hit, boost_flat about 1.15
+times. The cause was in `mark_erased()`:
+
+- The "branchless" `?:` of `kEmpty` and `kDeleted` was a branch in the
+  output of gcc 13 (`test; je`). Near the load limit this branch is close to
+  random.
+- The update of `growth_left_` had a branch on `deleted_` and called
+  `reset_growth_left()` at the tombstone limit.
+
+Both values are known only after the memory load of the find. Each
+mispredict threw away the finds of the next erases that were already in
+flight. The new code uses integer arithmetic for the control byte,
+`deleted_` and `growth_left_`, and it has no branch on them. The insert slow
+path now checks the tombstone limit; it is the only path that tombstones
+slow down. Also, `erase(key)` marks a key of the home group with the group
+that the probe loaded, without a second load of the group.
+
+Because of the noise, old and new code were compiled into one program (the
+old header in its own namespace) and run in turns. Min (median) of the
+runs, ns/op:
+
+| Workload | 1M old | 1M new | 10M old | 10M new |
+|---|---|---|---|---|
+| erase by key (half of the keys) | 20.5 (31.9) | **16.6** (23.0) | 52.0 (56.7) | **33.2** (49.0) |
+| churn (insert + erase at fixed size) | 30.0 (55.1) | 31.9 (43.3) | 80.5 (85.6) | **75.0** (113) |
+| insert (reserved) | 14.4 | 14.4 | 27.1 | 25.7 |
+| find hit (random order) | 9.4 | 9.3 | 23.9 | 23.3 |
+| find miss | 6.4 | 6.3 | 14.4 | 14.0 |
+
+1M: 15 runs, 10M: 9 runs. Rows other than erase do not change (the
+differences are in the noise). Octave churn and ie (`bench/octave.cpp`,
+10 sizes per octave, geomean, ns per operation):
+
+| Workload | sflat (d77af38) | sflat (f163c3d) | boost | absl | emhash8 | udm |
+|---|---|---|---|---|---|---|
+| churn 1K | **16.2** | 18.7 | 17.3 | 40.6 | 28.6 | 19.4 |
+| ie 1K | 11.7 | 13.1 | 12.1 | 26.7 | 21.9 | **11.4** |
+| churn 32K | **39.4** | 41.3 | 39.9 | 59.6 | 54.4 | 47.9 |
+| ie 32K | **29.9** | 30.5 | 30.1 | 42.4 | 41.0 | 34.4 |
+| churn 500K | 142.0 | 144.7 | **124.9** | 179.9 | 188.3 | 185.1 |
+| ie 500K | 118.7 | 120.4 | **109.6** | 137.2 | 157.0 | 161.5 |
 
 ## Intel Celeron N5105
 
