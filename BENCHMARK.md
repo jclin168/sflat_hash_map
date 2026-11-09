@@ -3,6 +3,14 @@
 This file has the benchmark results for all machines. The design of the map
 is in the [README](README.md).
 
+A separate [250M insert-only memory study](docs/benchmarks/memory-250m/README.md)
+records virtual address space and RSS with no reserve. sflat completed at
+4.818 GiB RSS (5.031 GiB peak); Google sparse also completed. The other four
+containers were stopped by the environment memory watchdog, so their
+snapshots are not completed 250M measurements. The study includes raw data,
+exact dependency revisions and reproduction instructions; its single-run
+memory results are separate from the timing tables below.
+
 The benchmark has been run on four machines:
 
 | CPU | Memory | sflat back end | Sizes |

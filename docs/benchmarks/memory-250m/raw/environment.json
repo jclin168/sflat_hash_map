@@ -1,0 +1,53 @@
+{
+  "binary_sha256": {
+    "sflat_flat_hash_map": "53804e29a880fceb2a115d12b47aa2ea44b28fcc9f1667c3445baf797642f17e",
+    "boost_unordered_flat_map": "4f6ed2ea7289bf193482c34dd8b5f50424ac8455dfd84e4cc320083e408af407",
+    "ankerl_unordered_dense": "2429c2ad57be5e0b420f812ca2b10541a22e3e8625923ebad4cd1f00f5190a02",
+    "abseil_flat_hash_map": "c3333b457ae51e3bea5d0cdf4ea44714795b1595656ef30d8fee727719376a39",
+    "google_dense_hash_map": "7225f43000a8b98b2ad0a77cddb13cff0d1fc8c005f80f899be5001a9b8ddc27",
+    "google_sparse_hash_map": "44ab024d923e9c711c3ba2ecfb7f1922ab4b266dbe4a8a24fb758a77a6591b9d"
+  },
+  "commits": {
+    "map_benchmark": "7acf8473809b93e5b504a41354238e9a61feb4ea",
+    "sflat": "f163c3d353e7c0b54dc73be0fb8b481c59aacc08",
+    "google_sparsehash": "f93c0c69e959c1c77611d0ba8d107aa971338811",
+    "ankerl": "7c58a8b7a48e790fe72f6508eb3b46317cbba9d5",
+    "abseil": "d38452e1ee03523a208362186fd42248ff2609f6",
+    "boost": "f976a2b7b525300c0ff63ace104d2d83793d3153"
+  },
+  "source_sha256": {
+    "CMakeLists.txt": "5ae676772e4de311be6c1d920f94aef43f82845b716cb89fcb6e2c1c166ba2ba",
+    "src/app/bench.h": "a8e59b34eb151e1af78be87324449080b405e5fdd77fd17b0bd7537c4c692c29",
+    "src/app/getRSS.cpp": "00f9a42f607ce990d52f29f8d3ee2db8c32f1d2fd66f785d3eccd626278ea20e",
+    "src/benchmarks/FlatMap64.cpp": "b564a5c8b386d855f685f316dedb300c31da59ef8ab440835f40f4c10d4a4dcf",
+    "src/app/google_hash_map_adapter.h": "12d5b3dca771b4c7914af83e8715818c15e534bfd39e478c6d7f6cb5d2a3cd2b"
+  },
+  "cpu_affinity": 0,
+  "cpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           46 bits physical, 57 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  3\nOn-line CPU(s) list:                     0-2\nVendor ID:                               GenuineIntel\nModel name:                              INTEL(R) XEON(R) PLATINUM 8573C\nCPU family:                              6\nModel:                                   207\nThread(s) per core:                      1\nCore(s) per socket:                      3\nSocket(s):                               1\nStepping:                                2\nBogoMIPS:                                4600.00\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 arat avx512vbmi umip waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid cldemote movdiri movdir64b fsrm serialize tsxldtrk avx512_fp16 arch_capabilities\nHypervisor vendor:                       KVM\nVirtualization type:                     full\nL1d cache:                               96 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)\nL2 cache:                                4 MiB (2 instances)\nL3 cache:                                260 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-2\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Vulnerable\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Vulnerable\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Vulnerable\nVulnerability Spectre v1:                Vulnerable: __user pointer sanitization and usercopy barriers only; no swapgs barriers\nVulnerability Spectre v2:                Vulnerable; STIBP: disabled; PBRSB-eIBRS: Not affected; BHI: Vulnerable\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+  "compiler": "c++ (Debian 14.2.0-19) 14.2.0\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+  "target_compile_flags": {
+    "sflat_flat_hash_map": "CXX_DEFINES = -DSFLAT_PROCESS_SEED=1\nCXX_FLAGS = -DNDEBUG -O3 -march=native -std=gnu++17 -fdiagnostics-color=always",
+    "boost_unordered_flat_map": "CXX_DEFINES = -DSFLAT_PROCESS_SEED=1\nCXX_FLAGS = -DNDEBUG -O3 -march=native -std=gnu++17 -fdiagnostics-color=always",
+    "ankerl_unordered_dense": "CXX_DEFINES = -DSFLAT_PROCESS_SEED=1\nCXX_FLAGS = -DNDEBUG -O3 -march=native -std=gnu++17 -fdiagnostics-color=always",
+    "abseil_flat_hash_map": "CXX_DEFINES = -DSFLAT_PROCESS_SEED=1\nCXX_FLAGS = -DNDEBUG -O3 -march=native -std=gnu++17 -fdiagnostics-color=always",
+    "google_dense_hash_map": "CXX_DEFINES = -DSFLAT_PROCESS_SEED=1\nCXX_FLAGS = -DNDEBUG -O3 -march=native -std=gnu++17 -fdiagnostics-color=always",
+    "google_sparse_hash_map": "CXX_DEFINES = -DSFLAT_PROCESS_SEED=1\nCXX_FLAGS = -DNDEBUG -O3 -march=native -std=gnu++17 -fdiagnostics-color=always"
+  },
+  "thp": "always [madvise] never",
+  "cgroup_memory_max": "8589934592",
+  "build_directory": "/workspace/deps/map_benchmark_full/build-flat64",
+  "flags": "C++17; std::hash; actual flags in target_compile_flags",
+  "timestamp_utc": "2026-11-09T21:39:07Z",
+  "inherited_rlimit_as": [
+    -1,
+    -1
+  ],
+  "entries": 250000000,
+  "limit_address_space_bytes": 0,
+  "rss_limit_bytes": 7516192768,
+  "cgroup_watchdog_bytes": 8053063680,
+  "watchdog_poll_seconds": 0.005,
+  "runner_sha256": "3023d60f903527f23b21b69c48ca4c57b560244d11dba9846584b26954bf0c70",
+  "input": "streaming bijective uint64; no input vector; no reserve; includes key generation and checkpoint overhead",
+  "source_sha256_stream": "111f76526b57024a15df385c8f783bac6b9cb472e977cc15b7a14dfdb6e7f1a8"
+}

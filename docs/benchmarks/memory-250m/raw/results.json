@@ -1,0 +1,174 @@
+[
+  {
+    "map": "sflat_flat_hash_map",
+    "returncode": 0,
+    "stop_reason": "completed",
+    "observed_rss_max_bytes": 5400129536,
+    "observed_hwm_max_bytes": 5402218496,
+    "observed_cgroup_max_bytes": 5973946368,
+    "observed_vmsize_max_bytes": 8625745920,
+    "observed_vmpeak_max_bytes": 8627843072,
+    "stop_snapshot": null,
+    "wall_s": 54.557584674999816,
+    "binary_sha256": "cc3cbbce890b04128ce01cfc96d159b2f55ab91a7383f31f853c2ebeeb3e042d",
+    "last": {
+      "status": "completed",
+      "inserted": "250000000",
+      "elapsed_s": "54.519518",
+      "rss_bytes": "5173637120",
+      "peak_bytes": "5402218496",
+      "baseline_bytes": "1810432",
+      "vmsize_bytes": "5178028032",
+      "vmpeak_bytes": "8627843072",
+      "baseline_vmsize_bytes": "6369280"
+    }
+  },
+  {
+    "map": "boost_unordered_flat_map",
+    "returncode": -9,
+    "stop_reason": "cgroup_watchdog",
+    "observed_rss_max_bytes": 7477485568,
+    "observed_hwm_max_bytes": 7477485568,
+    "observed_cgroup_max_bytes": 8054099968,
+    "observed_vmsize_max_bytes": 12891312128,
+    "observed_vmpeak_max_bytes": 12891312128,
+    "stop_snapshot": {
+      "rss_bytes": 7477485568,
+      "rss_hwm_bytes": 7477485568,
+      "vmsize_bytes": 12891312128,
+      "vmpeak_bytes": 12891312128,
+      "cgroup_bytes": 8054099968,
+      "elapsed_s": 44.72208941700228
+    },
+    "wall_s": 44.954455900999164,
+    "binary_sha256": "7b907b84ee711de0c5cff319b43a52acbd949b5d2f43854d5137d8f2a63baaa7",
+    "last": {
+      "status": "checkpoint",
+      "inserted": "220000000",
+      "elapsed_s": "31.505812",
+      "rss_bytes": "4296962048",
+      "peak_bytes": "6444359680",
+      "baseline_bytes": "1757184",
+      "vmsize_bytes": "4301373440",
+      "vmpeak_bytes": "6448861184",
+      "baseline_vmsize_bytes": "6320128"
+    }
+  },
+  {
+    "map": "ankerl_unordered_dense",
+    "returncode": -9,
+    "stop_reason": "cgroup_watchdog",
+    "observed_rss_max_bytes": 7479029760,
+    "observed_hwm_max_bytes": 7479029760,
+    "observed_cgroup_max_bytes": 8055087104,
+    "observed_vmsize_max_bytes": 8730615808,
+    "observed_vmpeak_max_bytes": 8730615808,
+    "stop_snapshot": {
+      "rss_bytes": 7479029760,
+      "rss_hwm_bytes": 7479029760,
+      "vmsize_bytes": 8730615808,
+      "vmpeak_bytes": 8730615808,
+      "cgroup_bytes": 8055087104,
+      "elapsed_s": 35.617863780000334
+    },
+    "wall_s": 35.82506131499758,
+    "binary_sha256": "aa0e3d5a5494589e83f63ee211e710b1ee6149c54dfe727fa1b4cfa2ee1513ad",
+    "last": {
+      "status": "checkpoint",
+      "inserted": "210000000",
+      "elapsed_s": "30.981632",
+      "rss_bytes": "4838428672",
+      "peak_bytes": "5773209600",
+      "baseline_bytes": "1765376",
+      "vmsize_bytes": "5777821696",
+      "vmpeak_bytes": "7925309440",
+      "baseline_vmsize_bytes": "6324224"
+    }
+  },
+  {
+    "map": "abseil_flat_hash_map",
+    "returncode": -9,
+    "stop_reason": "cgroup_watchdog",
+    "observed_rss_max_bytes": 7480700928,
+    "observed_hwm_max_bytes": 7480700928,
+    "observed_cgroup_max_bytes": 8056750080,
+    "observed_vmsize_max_bytes": 13696811008,
+    "observed_vmpeak_max_bytes": 13696811008,
+    "stop_snapshot": {
+      "rss_bytes": 7480700928,
+      "rss_hwm_bytes": 7480700928,
+      "vmsize_bytes": 13696811008,
+      "vmpeak_bytes": 13696811008,
+      "cgroup_bytes": 8056750080,
+      "elapsed_s": 28.840263281999796
+    },
+    "wall_s": 29.098421222999605,
+    "binary_sha256": "8974dfc1131ab807d32355adf6509e8d44b37da716311f359df8226edae8f200",
+    "last": {
+      "status": "checkpoint",
+      "inserted": "230000000",
+      "elapsed_s": "20.813778",
+      "rss_bytes": "4565499904",
+      "peak_bytes": "6847172608",
+      "baseline_bytes": "1855488",
+      "vmsize_bytes": "4570001408",
+      "vmpeak_bytes": "6851706880",
+      "baseline_vmsize_bytes": "6512640"
+    }
+  },
+  {
+    "map": "google_dense_hash_map",
+    "returncode": -9,
+    "stop_reason": "cgroup_watchdog",
+    "observed_rss_max_bytes": 7477964800,
+    "observed_hwm_max_bytes": 7477964800,
+    "observed_cgroup_max_bytes": 8053800960,
+    "observed_vmsize_max_bytes": 12891312128,
+    "observed_vmpeak_max_bytes": 12891312128,
+    "stop_snapshot": {
+      "rss_bytes": 7477964800,
+      "rss_hwm_bytes": 7477964800,
+      "vmsize_bytes": 12891312128,
+      "vmpeak_bytes": 12891312128,
+      "cgroup_bytes": 8053800960,
+      "elapsed_s": 16.15580299100111
+    },
+    "wall_s": 16.353649084001518,
+    "binary_sha256": "b931d67aea8a8cef95fac1cb3b993765e6c9532be6acca89c757e44e307bc2fe",
+    "last": {
+      "status": "checkpoint",
+      "inserted": "130000000",
+      "elapsed_s": "13.744415",
+      "rss_bytes": "4296962048",
+      "peak_bytes": "6444367872",
+      "baseline_bytes": "1757184",
+      "vmsize_bytes": "4301373440",
+      "vmpeak_bytes": "6448861184",
+      "baseline_vmsize_bytes": "6320128"
+    }
+  },
+  {
+    "map": "google_sparse_hash_map",
+    "returncode": 0,
+    "stop_reason": "completed",
+    "observed_rss_max_bytes": 4610150400,
+    "observed_hwm_max_bytes": 4610150400,
+    "observed_cgroup_max_bytes": 5180612608,
+    "observed_vmsize_max_bytes": 4614631424,
+    "observed_vmpeak_max_bytes": 4614631424,
+    "stop_snapshot": null,
+    "wall_s": 258.3444914159991,
+    "binary_sha256": "4fc708ce4d354aa0646935f30c6a55cac25e6ecadb4054de628915bdf498c3df",
+    "last": {
+      "status": "completed",
+      "inserted": "250000000",
+      "elapsed_s": "255.944866",
+      "rss_bytes": "4610150400",
+      "peak_bytes": "4610060288",
+      "baseline_bytes": "1773568",
+      "vmsize_bytes": "4614631424",
+      "vmpeak_bytes": "4614631424",
+      "baseline_vmsize_bytes": "6332416"
+    }
+  }
+]

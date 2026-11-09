@@ -153,6 +153,27 @@ ns/op, lower is better; see [BENCHMARK.md](BENCHMARK.md)):
 
 "Benchmark" below summarizes the other sizes and machines.
 
+### 250M insert-only memory study
+
+In a separate [250M-entry Linux memory study](docs/benchmarks/memory-250m/README.md),
+sflat completed insertion **without reserve** at **4.818 GiB RSS**, with a
+**5.031 GiB RSS peak**. Its virtual-address-space peak was **8.035 GiB**;
+virtual reservations and resident memory are different budgets.
+
+| Completed 250M map | Final VmSize GiB | Final RSS GiB | VmPeak GiB | RSS peak GiB |
+|---|---:|---:|---:|---:|
+| sflat | 4.822 | 4.818 | 8.035 | 5.031 |
+| Google sparse | 4.298 | 4.294 | 4.298 | 4.294 |
+
+Boost flat, Ankerl dense, Abseil flat and Google dense were stopped by the
+7.5 GiB total-environment memory watchdog before reaching 250M. Their
+[stop snapshots](docs/benchmarks/memory-250m/README.md#stopped-attempts-these-are-not-250m-measurements)
+are not completed 250M results. This was one process per map, with
+`uint64_t -> uint64_t`, default load factors, unlimited RLIMIT_AS and no
+input vector. Numbers here are whole-process values, without baseline
+subtraction; [raw data and reproduction steps](docs/benchmarks/memory-250m/README.md#data-and-reproduction)
+are included. This memory study does not establish a timing ranking.
+
 ## Quick start
 
 Add `include/` to your compiler's include path; there is no library to link.

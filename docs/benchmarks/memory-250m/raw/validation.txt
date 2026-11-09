@@ -1,0 +1,7 @@
+All six VmSize/VmPeak/RSS smoke checks passed.
+Formal stream executable hashes match smoke hashes.
+Sflat and Google sparse completed exactly 250M inserts; others stopped by total cgroup watchdog.
+Paired snapshot RSS <= VmSize <= VmPeak validated.
+RLIMIT_AS unlimited, source snapshots and runner hashes verified.
+Original six benchmark executables unchanged.
+Cgroup memory.events unchanged, no OOM or OOM kill.
