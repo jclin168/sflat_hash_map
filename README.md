@@ -359,7 +359,13 @@ multipliers of the mixer (`include/sflat/hash_mix.hpp`), which
   `SFLAT_NO_SEED`, without its quadratic cases. See "Configuration macros".
 - The seed stays the same while a table grows, so the growth above still works.
 - It moves with the storage, so move and swap stay O(1) and need no rehash.
-  A copy takes the seed of its source, so it still writes in order.
+  A copy takes the seed of its source, and with it the same table: the copy
+  constructor and copy assignment copy the control bytes, the overflow words and
+  each element at its slot (one `memcpy` for elements that copy as bytes),
+  with no hashing or probing. map_benchmark's Copy (1M `uint64_t` pairs, 200
+  copies each way): 3.3 s before, 1.4 s now. A source with more than twice the
+  slots it needs, or one that is migrating, is copied by inserting instead,
+  so a copy of a table that lost most of its elements still shrinks.
 - It does not make the map safe against chosen keys: the mixer is not keyed,
   and `std::hash` of an integer or a string has no seed.
 - Seeds of a process start at a random value (`getrandom` on Linux,

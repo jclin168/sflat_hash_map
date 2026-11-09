@@ -926,10 +926,75 @@ class flat_hash_map {
   void copy_elements_from(const flat_hash_map& other) {
     if (other.size_ == 0) return;
     mix_ = other.mix_;  // same order as other, so the writes stay sequential
+    // The same table, slot for slot: no hashing or probing, and one memcpy
+    // for elements that copy as bytes. Not while other migrates, and not when
+    // other has more than twice the slots it needs, so that a copy of a table
+    // that lost most of its elements still shrinks.
+    if (!other.is_migrating() && other.cap_ <= 2 * min_cap_for(other.size_)) {
+      clone_table_from(other);
+      return;
+    }
     rehash_to(min_cap_for(other.size_));
     for_each_slot(other, [this](const value_type* s) { place_unique(*s); });
     size_ = other.size_;
     reset_growth_left();
+  }
+
+  // Copy of other's table with the same capacity, mixer, control bytes,
+  // overflow words and tombstones; each element at its own slot. Precondition
+  // as copy_elements_from(), and other is not migrating. If a copy throws,
+  // the elements built so far are destroyed and *this keeps no storage.
+  void clone_table_from(const flat_hash_map& other) {
+    const size_t cap = other.cap_;
+    const size_t ng = cap / kWidth;
+    slot_type* const slots = alloc_slots(cap, true);
+    uint8_t* ctrl = nullptr;
+    detail::Overflow* overflow = nullptr;
+    try {
+      ctrl = alloc_bytes(cap);
+      overflow = alloc_overflow(ng);
+    } catch (...) {
+      if (ctrl) free_bytes(ctrl, cap);
+      free_slots(slots, cap);
+      throw;
+    }
+    if constexpr (std::is_trivially_copy_constructible<value_type>::value &&
+                  std::is_trivially_destructible<value_type>::value) {
+      std::memcpy(static_cast<void*>(slots), other.slots_, cap * sizeof(slot_type));
+    } else {
+      size_t g0 = 0;
+      Mask m = 0;
+      try {
+        for (; g0 < cap; g0 += kWidth) {
+          for (m = full_mask(Group::Load(other.ctrl_ + g0)); m; m &= m - 1) {
+            const size_t i = g0 + Group::Lane(m);
+            ::new (static_cast<void*>(&slots[i])) value_type(*other.slot_at(i));
+          }
+        }
+      } catch (...) {
+        // Destroy the lanes of group g0 built before the one that threw
+        // (the lowest lane still in m), then the earlier groups.
+        Mask built = full_mask(Group::Load(other.ctrl_ + g0)) & ~m;
+        for (; built; built &= built - 1)
+          reinterpret_cast<value_type*>(&slots[g0 + Group::Lane(built)])->~value_type();
+        for (size_t g = 0; g < g0; g += kWidth)
+          for (Mask d = full_mask(Group::Load(other.ctrl_ + g)); d; d &= d - 1)
+            reinterpret_cast<value_type*>(&slots[g + Group::Lane(d)])->~value_type();
+        free_overflow(overflow, ng);
+        free_bytes(ctrl, cap);
+        free_slots(slots, cap);
+        throw;
+      }
+    }
+    std::memcpy(ctrl, other.ctrl_, cap);
+    std::memcpy(overflow, other.overflow_, ng * sizeof(detail::Overflow));
+    slots_ = slots;
+    ctrl_ = ctrl;
+    overflow_ = overflow;
+    cap_ = cap;
+    size_ = other.size_;
+    deleted_ = other.deleted_;
+    update_limit();
   }
 
   // Precondition: *this is empty and has no storage.

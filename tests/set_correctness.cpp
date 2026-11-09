@@ -605,6 +605,24 @@ void test_range_insert() {
   std::printf("test_range_insert OK (%.3f s)\n", took.count());
 }
 
+// Copies take the table slot for slot, as in the map (clone_table_from).
+void test_copy_table() {
+  sflat::flat_hash_set<uint64_t> a;
+  for (uint64_t i = 0; i < 100000; ++i) a.insert(i * 7);
+  for (uint64_t i = 0; i < 100000; i += 3) a.erase(i * 7);
+  sflat::flat_hash_set<uint64_t> b(a);
+  CHECK(b == a && b.bucket_count() == a.bucket_count());
+  b.insert(1);
+  CHECK(a.count(1) == 0 && b.size() == a.size() + 1);
+  sflat::flat_hash_set<std::string> sa;
+  for (uint64_t i = 0; i < 50000; ++i) sa.insert(std::string(30, 'a') + std::to_string(i));
+  for (uint64_t i = 0; i < 50000; i += 4) sa.erase(std::string(30, 'a') + std::to_string(i));
+  sflat::flat_hash_set<std::string> sb;
+  sb = sa;
+  CHECK(sb == sa && sb.bucket_count() == sa.bucket_count());
+  std::printf("test_copy_table OK\n");
+}
+
 int main() {
   test_api_surface();
   test_random_ops();
@@ -619,6 +637,7 @@ int main() {
   test_iterate_and_insert();
   test_safety_net();
   test_range_insert();
+  test_copy_table();
   std::printf("ALL SET TESTS PASSED\n");
   return 0;
 }
