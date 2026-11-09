@@ -1,0 +1,1269 @@
+diff --git a/.gitignore b/.gitignore
+index 9293f62d61a5ce8473ee72dfabb549a39ba60791..ff92db941ecd0a3c86c462291b1e3dd833e23607 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,4 +39,8 @@
+ *.html
+ *.dat
+ 
+-/build_gcc
+\ No newline at end of file
++/build_gcc
++# Local benchmark builds and generated measurements
++/build-*/
++/results-flat64*/
++*.log
+diff --git a/.gitmodules b/.gitmodules
+index d7899f22a5d9b946371b332eb069bad9ade5a225..8371a9763207dcb26e2a01db8c3aa9352854fe26 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -74,3 +74,9 @@
+ 	path = external/boost__container_hash
+ 	url = https://github.com/boostorg/container_hash.git
+ 	branch = develop
++[submodule "external/jclin168__sflat_hash_map"]
++	path = external/jclin168__sflat_hash_map
++	url = https://github.com/jclin168/sflat_hash_map.git
++[submodule "external/google__sparsehash"]
++	path = external/google__sparsehash
++	url = https://github.com/sparsehash/sparsehash.git
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d613b96ac4a2fba4de829c725f0c49795d32e907..592732f73889c02c9927b65a1e340689c607eb85 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 2.8.9)
++cmake_minimum_required(VERSION 3.16)
+ project (map_benchmark)
+ 
+ set(CMAKE_CXX_STANDARD 17)
+@@ -12,10 +12,13 @@ list(APPEND FOLLY_CXX_FLAGS "-DNDEBUG -march=native")
+ #SET(CMAKE_CXX_FLAGS_RELEASE "-O3")
+ #list(APPEND FOLLY_CXX_FLAGS "-O3")
+ 
+-SET(CMAKE_EXE_LINKER_FLAGS "-fuse-ld=gold ${CMAKE_EXE_LINKER_FLAGS}")
++option(MAP_BENCH_USE_GOLD "Link with the optional GNU gold linker" OFF)
++if(MAP_BENCH_USE_GOLD)
++  add_link_options(-fuse-ld=gold)
++endif()
+ #SET(CMAKE_STATIC_LINKER_FLAGS "-fuse-ld=gold ${CMAKE_STATIC_LINKER_FLAGS}")
+-SET(MAKE_MODULE_LINKER_FLAGS "-fuse-ld=gold ${MAKE_MODULE_LINKER_FLAGS}")
+-SET(CMAKE_SHARED_LINKER_FLAGS "-fuse-ld=gold ${CMAKE_SHARED_LINKER_FLAGS}")
++
++
+ 
+ file(GLOB SRC_BENCHMARKS "src/benchmarks/*.cpp")
+ file(GLOB SRC_APP "src/app/*.cpp")
+@@ -28,7 +31,36 @@ file(GLOB INC_MAPS "src/maps/*")
+ # boost: use locally built boost version
+ set(BOOST_ROOT "/home/martinus/dev/boost_1_82_0_install" CACHE PATH "Boost library path" )
+ #list(APPEND CMAKE_PREFIX_PATH /home/martinus/Downloads/boost_1_81_0)
+-find_package(Boost 1.81 COMPONENTS container REQUIRED) # for allocators
++set(MAP_BENCH_BOOST_SOURCE_DIR "" CACHE PATH "Optional modular Boost source tree (headers)")
++if(MAP_BENCH_BOOST_SOURCE_DIR)
++  file(GLOB Boost_INCLUDE_DIRS "${MAP_BENCH_BOOST_SOURCE_DIR}/libs/*/include")
++else()
++  find_package(Boost 1.81 COMPONENTS container REQUIRED)
++endif()
++set(MAP_BENCH_MAPS "" CACHE STRING "Semicolon-separated adapter directory names; empty selects all")
++set(MAP_BENCH_HASHES "" CACHE STRING "Semicolon-separated hash directory names; empty selects all")
++set(MAP_BENCH_ANKERL_DIR "${CMAKE_SOURCE_DIR}/external/martinus__unordered_dense" CACHE PATH "Ankerl source tree")
++set(MAP_BENCH_ABSEIL_DIR "${CMAKE_SOURCE_DIR}/external/abseil__abseil-cpp" CACHE PATH "Abseil source tree")
++function(select_adapters result folder selection header)
++  if(${selection})
++    set(selected)
++    foreach(name IN LISTS ${selection})
++      set(dir "${CMAKE_SOURCE_DIR}/src/${folder}/${name}")
++      if(NOT EXISTS "${dir}/${header}")
++        message(FATAL_ERROR "Unknown ${folder} adapter: ${name}")
++      endif()
++      list(APPEND selected "${dir}")
++    endforeach()
++    set(${result} "${selected}" PARENT_SCOPE)
++  endif()
++endfunction()
++select_adapters(INC_MAPS maps MAP_BENCH_MAPS Map.h)
++select_adapters(INC_HASHES hashes MAP_BENCH_HASHES Hash.h)
++set(MAP_BENCH_SFLAT_SEED "" CACHE STRING "Optional reproducible SFLAT_PROCESS_SEED")
++if(NOT MAP_BENCH_SFLAT_SEED STREQUAL "")
++  add_compile_definitions(SFLAT_PROCESS_SEED=${MAP_BENCH_SFLAT_SEED})
++endif()
++include(CTest)
+ 
+ 
+ # absl stuff: see https://github.com/abseil/abseil-cpp/tree/master/CMake
+@@ -42,7 +74,7 @@ if(MSVC)
+     add_definitions(/DNOMINMAX /DWIN32_LEAN_AND_MEAN=1 /D_CRT_SECURE_NO_WARNINGS)
+ endif()
+ set(ABSL_PROPAGATE_CXX_STD ON)
+-add_subdirectory("external/abseil__abseil-cpp")
++add_subdirectory("${MAP_BENCH_ABSEIL_DIR}" abseil EXCLUDE_FROM_ALL)
+ 
+ # pthread, required by absl see https://github.com/abseil/abseil-cpp/issues/183#issuecomment-458453010
+ set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+@@ -97,6 +129,10 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+     add_compile_options (-fcolor-diagnostics)
+ endif ()
+ 
++# The controlled profile and its adapter tests apply only to these interfaces.
++set(MAP_BENCH_FLAT64_ADAPTERS sflat_flat_hash_map boost_unordered_flat_map
++    ankerl_unordered_dense abseil_flat_hash_map google_dense_hash_map google_sparse_hash_map)
++
+ # create targets for all map - hash pairs
+ 
+ foreach(HASH_DIR ${INC_HASHES})
+@@ -116,8 +152,18 @@ foreach(MAP_DIR ${INC_MAPS})
+         file(GLOB SRC_MAP_DIR "${MAP_DIR}/*.cpp")
+         file(GLOB SRC_HASH_DIR "${HASH_DIR}/*.cpp")
+ 
+-        add_executable(${EXECUTABLE_NAME} ${SRC_APP} ${SRC_BENCHMARKS} ${SRC_MAP_DIR} ${SRC_HASH_DIR})
++        set(MAP_BENCH_SOURCES ${SRC_BENCHMARKS})
++        if(NOT MAP_NAME IN_LIST MAP_BENCH_FLAT64_ADAPTERS)
++            list(REMOVE_ITEM MAP_BENCH_SOURCES "${CMAKE_SOURCE_DIR}/src/benchmarks/FlatMap64.cpp")
++        endif()
++        add_executable(${EXECUTABLE_NAME} ${SRC_APP} ${MAP_BENCH_SOURCES} ${SRC_MAP_DIR} ${SRC_HASH_DIR})
+         target_include_directories(${EXECUTABLE_NAME} PRIVATE "src/app" "external" ${MAP_DIR} ${HASH_DIR} ${FOLLY_DIR})
++        if(BUILD_TESTING AND MAP_NAME IN_LIST MAP_BENCH_FLAT64_ADAPTERS)
++          set(TEST_NAME "adapter_${MAP_NAME}__${HASH_NAME}")
++          add_executable(${TEST_NAME} EXCLUDE_FROM_ALL tests/adapter_smoke.cpp)
++          target_include_directories(${TEST_NAME} PRIVATE "src/app" "external" ${MAP_DIR} ${HASH_DIR})
++          add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
++        endif()
+ 
+         if (EXISTS "${MAP_DIR}/dependencies.cmake")
+             include("${MAP_DIR}/dependencies.cmake")
+@@ -127,6 +173,18 @@ foreach(MAP_DIR ${INC_MAPS})
+             include("${HASH_DIR}/dependencies.cmake")
+         endif ()
+ 
++        if(BUILD_TESTING AND MAP_NAME IN_LIST MAP_BENCH_FLAT64_ADAPTERS)
++          set(BENCH_TARGET "${EXECUTABLE_NAME}")
++          set(EXECUTABLE_NAME "${TEST_NAME}")
++          if(EXISTS "${MAP_DIR}/dependencies.cmake")
++            include("${MAP_DIR}/dependencies.cmake")
++          endif()
++          if(EXISTS "${HASH_DIR}/dependencies.cmake")
++            include("${HASH_DIR}/dependencies.cmake")
++          endif()
++          set(EXECUTABLE_NAME "${BENCH_TARGET}")
++          add_dependencies(${EXECUTABLE_NAME} ${TEST_NAME})
++        endif()
+         add_dependencies("${HASH_NAME}_all" ${EXECUTABLE_NAME})
+         add_dependencies("${MAP_NAME}_all" ${EXECUTABLE_NAME})
+     endforeach(HASH_DIR ${INC_HASHES})
+diff --git a/README.md b/README.md
+index 647c51b09f9496518650ebba0fcea09d3fc61c16..a2983da36d71a687877745891bf353b2c748b516 100644
+--- a/README.md
++++ b/README.md
+@@ -87,4 +87,7 @@ The implementation if the benchmark is open source, get it here: [martinus/map_b
+ 
+ Sources:
+ * https://wiki.ubuntuusers.de/GRUB_2/Konfiguration/
+-* https://perf.readthedocs.io/en/latest/system.html
+\ No newline at end of file
++* https://perf.readthedocs.io/en/latest/system.html
++# Six-map flat hash comparison
++
++See [the controlled flat64 profile](docs/FLAT64.md) for sflat, Boost, Ankerl, Abseil, Google dense/sparse adapters, selective builds, runtime/RSS recording and reproducible runs. Original suite cases remain available.
+diff --git a/cmake/Sparsehash.cmake b/cmake/Sparsehash.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..57a5c095a6b847c2c79fb1c27d522c5574fdb053
+--- /dev/null
++++ b/cmake/Sparsehash.cmake
+@@ -0,0 +1,30 @@
++include_guard(GLOBAL)
++function(map_bench_sparsehash target)
++  set(src "${CMAKE_SOURCE_DIR}/external/google__sparsehash")
++  set(cfg "${CMAKE_BINARY_DIR}/sparsehash-config")
++  if(WIN32)
++    target_include_directories(${target} PRIVATE "${src}/src/windows" "${src}/src")
++    return()
++  endif()
++  if(NOT TARGET map_bench_sparsehash_config)
++    file(MAKE_DIRECTORY "${cfg}")
++    execute_process(COMMAND "${src}/configure" --disable-dependency-tracking
++      WORKING_DIRECTORY "${cfg}" RESULT_VARIABLE status
++      OUTPUT_FILE "${cfg}/configure.log" ERROR_FILE "${cfg}/configure-error.log")
++    if(NOT status EQUAL 0)
++      message(FATAL_ERROR "sparsehash configure failed; see ${cfg}/configure-error.log")
++    endif()
++    find_program(MAP_BENCH_MAKE NAMES gmake make)
++    if(NOT MAP_BENCH_MAKE)
++      message(FATAL_ERROR "GNU make is required to generate the sparsehash config header")
++    endif()
++    execute_process(COMMAND "${MAP_BENCH_MAKE}" src/sparsehash/internal/sparseconfig.h
++      WORKING_DIRECTORY "${cfg}" RESULT_VARIABLE status
++      OUTPUT_FILE "${cfg}/header.log" ERROR_FILE "${cfg}/header-error.log")
++    if(NOT status EQUAL 0)
++      message(FATAL_ERROR "sparsehash header generation failed; see ${cfg}/header-error.log")
++    endif()
++    add_custom_target(map_bench_sparsehash_config)
++  endif()
++  target_include_directories(${target} PRIVATE "${cfg}/src" "${src}/src")
++endfunction()
+diff --git a/docs/FLAT64.md b/docs/FLAT64.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..04d15e9a2df1e563f64d66e46eea651afc8dd67e
+--- /dev/null
++++ b/docs/FLAT64.md
+@@ -0,0 +1,121 @@
++# Six-map flat hash profile
++
++The profile adds `sflat::flat_hash_map`, `google::dense_hash_map` and `google::sparse_hash_map` adapters to the existing map/hash matrix. It compares them with Boost unordered_flat_map, Ankerl unordered_dense and Abseil flat_hash_map. Original benchmark sources remain available and compile into each selected executable.
++
++The controlled `FlatMap64Reserved` and `FlatMap64Grow` cases run through the original `BenchRegistry`, `Bench` timer and RSS functions. They extend the suite with common uint64_t keys/values and a memory baseline that excludes the input vector. These are additional cases, not a claim that every original suite workload was executed.
++
++## Dependencies and build
++
++Initialize the required submodules without recursing into unrelated test dependencies:
++
++```sh
++git submodule update --init \
++  external/jclin168__sflat_hash_map external/google__sparsehash \
++  external/martinus__unordered_dense external/abseil__abseil-cpp
++```
++
++Use installed Boost >= 1.81, or provide a modular Boost source tree (including its needed header submodules) with `MAP_BENCH_BOOST_SOURCE_DIR`. Google sparsehash's configure script and GNU make generate only its small platform config header; no library installation is needed. On Windows the supplied sparsehash Windows config is used. Build tooling and measured results in this change are validated on Linux.
++
++```sh
++MAP_BENCH_BOOST_SOURCE_DIR=/path/to/boost ./tools/build_flat64.sh
++ctest --test-dir build-flat64 --output-on-failure
++python3 tools/run_flat64.py
++python3 tools/summarize_flat64.py results-flat64
++```
++
++Override the CMake executable using `MAP_BENCH_CMAKE` if necessary. In the cloud workspace it is `/workspace/build-tools/cmake/data/bin/cmake`; the Boost source tree is `/workspace/deps/boost`. Build jobs default to two and can be set with `MAP_BENCH_BUILD_JOBS`.
++
++CMake options:
++
++- `MAP_BENCH_MAPS`: semicolon-separated adapter directory names; empty retains the full map matrix.
++- `MAP_BENCH_HASHES`: semicolon-separated hash directory names; empty retains all hashes.
++- `MAP_BENCH_ANKERL_DIR`, `MAP_BENCH_ABSEIL_DIR`: optional source overrides, defaulting to their pinned submodules.
++- `MAP_BENCH_BOOST_SOURCE_DIR`: optional Boost source tree for headers. The initial six-map profile does not need compiled Boost libraries. Other allocator adapters may require Boost.Container as before.
++- `MAP_BENCH_SFLAT_SEED`: optional deterministic process seed. The provided profile uses 1; general builds leave the library default unchanged.
++- `MAP_BENCH_USE_GOLD`: opt-in use of gold; the default system linker works without gold installed.
++
++## Running
++
++```sh
++# Smaller validation run; all six maps, each in a fresh process.
++python3 tools/run_flat64.py --sizes 1000 --repeats 1 --out results-flat64-smoke
++
++# Main profile: default 1M, 10M, 100M; three independent processes per case.
++python3 tools/run_flat64.py --sizes 1000000 10000000 100000000 --repeats 3
++
++# Two original upstream cases, one process each, as compatibility checks.
++python3 tools/run_flat64.py --native-only --out results-flat64-native
++
++# Original cases remain selectable.
++build-flat64/bench_sflat_flat_hash_map__std_hash --list
++build-flat64/bench_sflat_flat_hash_map__std_hash Copy
++```
++
++The runner pins each process to one allowed CPU, randomizes map/case order within each size/repetition, runs one process at a time, records dependency SHAs and environment metadata, and saves raw semicolon output plus parsed per-process checkpoints. It aborts on nonzero status, malformed rows or benchmark verification failure. `--resume` can reuse completed checkpoints from an identical build. Default per-process timeout is 1800 seconds.
++
++`FlatMap64Reserved` measures reserve+insert, random-order successful find, and unsuccessful find. `FlatMap64Grow` measures insertion without reserve. Each find phase queries N keys. Key generation/shuffling and RSS reads are outside timers. Insert uses the value_type insert API across all six libraries. The native Google API is accessed only after the common corpus has excluded its reserved keys. Hit count, size, value checksum and zero false hits are checked. This profile does not enable the experimental sflat batch patch or modify default load factors/THP behavior.
++
++## Memory output
++
++Without `MAP_BENCH_EXTRA_MEMORY`, the first eight original output fields remain unchanged. With `MAP_BENCH_EXTRA_MEMORY=1`, append:
++
++1. Current RSS in MiB.
++2. Current RSS minus the selected baseline in MiB.
++3. Cumulative process peak RSS in MiB.
++4. Baseline current RSS in MiB.
++5. Cumulative peak RSS minus that baseline, clamped at zero, in MiB.
++
++For the controlled cases, the baseline is captured after filling the 8N-byte input vector and before map construction. The primary steady-memory comparison is field 2 at the insert measurement, while the map is alive. The growth comparison uses field 5 as a peak-memory estimate. For original workloads, the default baseline is benchmark entry; their allocations and object lifetimes differ, so the delta is not necessarily memory for one map.
++
++The original eighth field remains the cumulative peak increase relative to benchmark entry, including input buffers in the controlled cases. It must not be labeled steady map memory. Current RSS uses Linux smaps_rollup when available, falling back to statm; peak uses getrusage. These kernel accounting methods can differ slightly. Peak-minus-baseline is an estimate, includes runtime/allocator overhead, and is not an isolated per-allocation profiler. At tiny sizes, process startup peaks can dominate. There is no memory prediction for 1B from this run.
++
++## Google adapter restrictions
++
++Dense hash reserves two keys, sparse hash reserves one deleted marker. Integral markers use max()/max()-1; string markers use explicit unlikely non-ASCII marker strings. The controlled uint64_t corpus excludes both integral markers for every map and generates disjoint missing keys via a bijection. This avoids bias from duplicate keys and makes the input domain identical.
++
++The compatibility wrapper sets native sentinels, translates reserve to resize and emplace to native value_type insert, and rejects insertion of reserved keys. It is intended for the benchmark's integral/string key types, not as a general drop-in unordered_map replacement. Original workloads that produce a reserved key cannot be run unchanged through Google's native sentinel-based table. The two executed original cases passed verification for all six adapters; that is not a claim that all original workloads avoid the markers.
++
++## Reproducibility and interpretation
++
++The initial run uses sflat f163c3d353e7, Ankerl 5.3.3 (7c58a8b7a48e), Abseil LTS 20250814.1 (d38452e1ee03), sparsehash 2.0.4 (f93c0c69e959), and Boost 1.93 development headers. Exact actual source SHAs, build flags, CPU, seed and memory policy are recorded in the result manifest. The Ankerl/Abseil submodule revisions are updated to match this comparison.
++
++Report medians of independent processes and their min/max ranges. Internal phases from one process are not independent repetitions. Results apply to this uniform integer corpus and platform; strings, adversarial hashes, mixed updates and the remaining original suite cases can rank differently. A shared VM can produce large timing outliers; do not infer a stable advantage from small differences. All first-pass measurements are performed, not extrapolated from previous tables.
++
++## Streaming 500M no-reserve probe
++
++`tools/insert_stream.cpp` is an additional insert-only executable using the same adapters, hash, compiler flags and dependency libraries from `build-flat64`. It generates unique keys on demand, excludes Google's markers, inserts native value_type pairs without reserve, and records RSS/peak every 10M inserts plus completion/allocation failure. It does not allocate an input vector or run find. Its elapsed time includes key generation/checkpoint overhead and is not directly comparable to FlatMap64Grow timings.
++
++```sh
++# Large-memory machine: no artificial address-space cap. Keep adequate RAM available.
++python3 tools/run_insert_stream.py --entries 500000000 --limit-gib 0
++python3 tools/summarize_insert_stream.py results-flat64-500m
++
++# Reproduce the diagnostic performed on this 8 GiB environment:
++python3 tools/run_insert_stream.py --entries 500000000 --limit-gib 7
++```
++
++The script builds separate executables under `build-flat64-stream`, preserving the earlier benchmark binaries. `--limit-gib` sets RLIMIT_AS (virtual address space), not resident RAM. Default 7 GiB is a protective diagnostic budget for this environment. mmap reservations and simultaneous old/new arrays count even when their pages are not resident. Partial insertion counts and peaks under this limit must not be labeled 500M memory or interpreted as maximum capacity under an equivalent physical-RAM budget. Google native allocation failures can terminate with a signal; in that case only the last completed checkpoint is available and is a lower bound. A complete 500M comparison requires adequate RAM; results in results-flat64-500m document whether each map actually completed. A run without the cap should be performed on a larger machine, not this 8 GiB environment.
++
++## 300M with resident-memory monitoring and unlimited virtual address space
++
++```sh
++python3 tools/run_insert_stream.py --entries 300000000 --limit-gib 0 \
++  --rss-limit-gib 7 --cgroup-limit-gib 7.5 --out results-flat64-300m-rss
++python3 tools/summarize_insert_rss.py results-flat64-300m-rss
++```
++
++`--limit-gib 0` leaves RLIMIT_AS unlimited. This mode monitors actual `/proc/PID/status` VmRSS and VmHWM every approximately 5 ms and kills the child when process RSS exceeds 7 GiB, or total cgroup memory.current exceeds 7.5 GiB. The cgroup itself retains its 8 GiB hard cap. The latter watchdog leaves space for other processes and page cache, and can fire slightly before the process RSS threshold. This is a sampled watchdog, not a kernel hard RSS cap; Linux RLIMIT_RSS does not enforce resident memory limits. Sampled peaks may slightly exceed thresholds and are lower bounds for killed processes.
++
++For completed runs, the report shows live-map RSS after all 300M insertions, excluding process baseline, plus cumulative peak. For incomplete runs the final 300M RSS is unavailable; the last confirmed 10M checkpoint is a lower bound on progress, and the monitor's peak is a lower bound on memory reached. Do not substitute either for the memory required to complete 300M. These are single-process memory measurements, one run per adapter, not a repeat-based timing comparison. The runner records inherited RLIMIT_AS, stop reasons, observed process/cgroup peaks, hashes, raw checkpoints and before/after cgroup OOM event counters. The original benchmark executables remain unchanged.
++
++## 250M virtual address space and RSS
++
++```sh
++python3 tools/run_insert_stream.py --entries 250000000 --limit-gib 0 \
++  --rss-limit-gib 7 --cgroup-limit-gib 7.5 --out results-flat64-250m-vm-rss
++python3 tools/summarize_insert_vm_rss.py results-flat64-250m-vm-rss
++```
++
++The streaming executable appends `vmsize_bytes`, `vmpeak_bytes`, and `baseline_vmsize_bytes` to its original six CSV fields. These are Linux /proc/self/status values, sampled while the map remains alive. The watchdog also records virtual high-water marks and a paired VmSize/RSS snapshot immediately before killing an over-budget process. Completed maps are reported after exactly 250M inserts; incomplete maps are reported separately at their stop snapshot and do not have a completed 250M measurement.
++
++This report uses absolute whole-process VmSize/RSS, preserving their baselines in raw CSV. This differs from the baseline-subtracted map RSS column in earlier reports by the small process startup footprint. VmSize measures currently mapped virtual address space; VmPeak is its historical maximum. Neither is committed physical memory. The virtual and resident peaks may occur at different times. RLIMIT_AS remains unlimited; physical-memory watchdog settings are the same as the 300M run. Source and binary hashes for the new measurement executable are stored alongside the results, and older result directories retain their own measured source snapshots.
+diff --git a/external/abseil__abseil-cpp b/external/abseil__abseil-cpp
+index 42a3c030c958e6e099162b746ada04792b3a1c67..d38452e1ee03523a208362186fd42248ff2609f6 160000
+--- a/external/abseil__abseil-cpp
++++ b/external/abseil__abseil-cpp
+@@ -1 +1 @@
+-Subproject commit 42a3c030c958e6e099162b746ada04792b3a1c67
++Subproject commit d38452e1ee03523a208362186fd42248ff2609f6
+diff --git a/external/google__sparsehash b/external/google__sparsehash
+new file mode 160000
+index 0000000000000000000000000000000000000000..f93c0c69e959c1c77611d0ba8d107aa971338811
+--- /dev/null
++++ b/external/google__sparsehash
+@@ -0,0 +1 @@
++Subproject commit f93c0c69e959c1c77611d0ba8d107aa971338811
+diff --git a/external/jclin168__sflat_hash_map b/external/jclin168__sflat_hash_map
+new file mode 160000
+index 0000000000000000000000000000000000000000..f163c3d353e7c0b54dc73be0fb8b481c59aacc08
+--- /dev/null
++++ b/external/jclin168__sflat_hash_map
+@@ -0,0 +1 @@
++Subproject commit f163c3d353e7c0b54dc73be0fb8b481c59aacc08
+diff --git a/external/martinus__unordered_dense b/external/martinus__unordered_dense
+index 3add2a63444869d123e24792f17b5618edfaee44..7c58a8b7a48e790fe72f6508eb3b46317cbba9d5 160000
+--- a/external/martinus__unordered_dense
++++ b/external/martinus__unordered_dense
+@@ -1 +1 @@
+-Subproject commit 3add2a63444869d123e24792f17b5618edfaee44
++Subproject commit 7c58a8b7a48e790fe72f6508eb3b46317cbba9d5
+diff --git a/src/app/bench.h b/src/app/bench.h
+index b58ce869ba4634643c82af37cb71d91a5f42593c..97d1e535daccb47edf22ba4339f52b5dc7cc7d40 100644
+--- a/src/app/bench.h
++++ b/src/app/bench.h
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
+ #include <chrono>
++#include <cstdlib>
++#include <cstdint>
++#include <stdexcept>
+ #include <fstream>
+ #include <functional>
+ #include <initializer_list>
+@@ -32,8 +35,13 @@ public:
+     Bench(std::string testName)
+         : mTestName(std::move(testName)) {
+         mInitialPeakRss = getPeakRSS();
++        mMemoryBaselineRss = getCurrentRSS();
++        mExtraMemory = std::getenv("MAP_BENCH_EXTRA_MEMORY") != nullptr;
+     }
+ 
++    // Call after preparing input buffers, before constructing the measured map.
++    void setMemoryBaseline() { mMemoryBaselineRss = getCurrentRSS(); }
++
+     inline void beginMeasure(const char* measurementName) {
+         ++mMeasureCount;
+         show_tags(measurementName);
+@@ -67,10 +75,20 @@ private:
+         }
+ 
+         std::cout << actual_result << mSep << runtime_sec << mSep << (peakRss / 1048576.0);
++        if (mExtraMemory) {
++            auto current = getCurrentRSS();
++            auto peak = getPeakRSS();
++            auto delta = static_cast<int64_t>(current) - static_cast<int64_t>(mMemoryBaselineRss);
++            auto peak_delta = static_cast<int64_t>(peak) - static_cast<int64_t>(mMemoryBaselineRss);
++            std::cout << mSep << current / 1048576.0 << mSep << delta / 1048576.0
++                      << mSep << peak / 1048576.0 << mSep << mMemoryBaselineRss / 1048576.0
++                      << mSep << (peak_delta > 0 ? peak_delta / 1048576.0 : 0.0);
++        }
+         if (actual_result != expected_result) {
+             std::cout << mSep << mQuote << "ERROR: expected " << expected_result << " but got " << actual_result << mQuote;
+         }
+         std::cout << std::endl;
++        if (actual_result != expected_result) throw std::runtime_error("benchmark result mismatch");
+     }
+ 
+     clock::time_point mStartTime;
+@@ -78,6 +96,8 @@ private:
+     const char* mQuote = "\"";
+     std::string const mTestName;
+     size_t mInitialPeakRss;
++    size_t mMemoryBaselineRss = 0;
++    bool mExtraMemory = false;
+     size_t mMeasureCount = 0;
+ };
+ 
+@@ -112,9 +132,14 @@ public:
+         try {
+             Bench bench(it->first);
+             it->second(bench);
++        } catch (const std::exception& e) {
++            std::cout << "\"EXCEPTION\"" << std::endl;
++            std::cerr << e.what() << std::endl;
++            return 1;
+         } catch (...) {
+             // make sure we get a newline, even in case of an exception.
+             std::cout << "\"EXCEPTION\"" << std::endl;
++            return 1;
+         }
+         return 0;
+     }
+diff --git a/src/app/getRSS.cpp b/src/app/getRSS.cpp
+index 157262acff70c62566482d786d9171e8ca3f8474..90b13f8d07331a4f93ca0585c1c2aae75cfeda92 100644
+--- a/src/app/getRSS.cpp
++++ b/src/app/getRSS.cpp
+@@ -103,6 +103,19 @@ size_t getCurrentRSS( )
+ 
+ #elif defined(__linux__) || defined(__linux) || defined(linux) || defined(__gnu_linux__)
+ 	/* Linux ---------------------------------------------------- */
++    // smaps_rollup avoids statm's approximate per-CPU RSS accounting.
++    FILE* rollup = fopen("/proc/self/smaps_rollup", "r");
++    if (rollup) {
++        char line[256];
++        unsigned long kib = 0;
++        while (fgets(line, sizeof(line), rollup)) {
++            if (sscanf(line, "Rss: %lu kB", &kib) == 1) {
++                fclose(rollup);
++                return static_cast<size_t>(kib) * 1024;
++            }
++        }
++        fclose(rollup);
++    }
+ 	long rss = 0L;
+ 	FILE* fp = NULL;
+ 	if ( (fp = fopen( "/proc/self/statm", "r" )) == NULL )
+diff --git a/src/app/google_hash_map_adapter.h b/src/app/google_hash_map_adapter.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6eb2edf45e15bca2d61c022db4d875202a2b9da4
+--- /dev/null
++++ b/src/app/google_hash_map_adapter.h
+@@ -0,0 +1,58 @@
++#pragma once
++// Compatibility for sparsehash 2.0.4. The native sentinel restrictions remain
++// explicit: dense reserves two keys, sparse reserves the deleted marker.
++#include <sparsehash/dense_hash_map>
++#include <sparsehash/sparse_hash_map>
++#include <limits>
++#include <stdexcept>
++#include <string>
++#include <type_traits>
++#include <utility>
++
++template<class Key> struct GoogleBenchmarkMarkers {
++    static Key empty() { return (std::numeric_limits<Key>::max)(); }
++    static Key deleted() { return static_cast<Key>((std::numeric_limits<Key>::max)() - 1); }
++};
++template<> struct GoogleBenchmarkMarkers<std::string> {
++    static std::string empty() { return "\xff-map-benchmark-empty-\xff"; }
++    static std::string deleted() { return "\xff-map-benchmark-deleted-\xff"; }
++};
++template<class Key, class Val, class H, bool Dense>
++class GoogleMapAdapter : public std::conditional_t<Dense,
++    google::dense_hash_map<Key,Val,H>, google::sparse_hash_map<Key,Val,H>> {
++    using Base = std::conditional_t<Dense,
++        google::dense_hash_map<Key,Val,H>, google::sparse_hash_map<Key,Val,H>>;
++    static void require_key(const Key& k) {
++        if (is_reserved_key(k)) throw std::invalid_argument("Google sparsehash reserved sentinel key");
++    }
++public:
++    using native_type = Base;
++    using typename Base::iterator;
++    using typename Base::const_iterator;
++    using typename Base::value_type;
++    using typename Base::size_type;
++    GoogleMapAdapter() {
++        if constexpr(Dense) this->set_empty_key(GoogleBenchmarkMarkers<Key>::empty());
++        this->set_deleted_key(GoogleBenchmarkMarkers<Key>::deleted());
++    }
++    static bool is_reserved_key(const Key& k) {
++        return k == GoogleBenchmarkMarkers<Key>::deleted() ||
++            (Dense && k == GoogleBenchmarkMarkers<Key>::empty());
++    }
++    void reserve(size_t n) { Base::resize(n); }
++    Val& operator[](const Key& k) { require_key(k); return Base::operator[](k); }
++    Val& operator[](Key&& k) { require_key(k); return Base::operator[](k); }
++    iterator find(const Key& k) { return is_reserved_key(k) ? Base::end() : Base::find(k); }
++    const_iterator find(const Key& k) const { return is_reserved_key(k) ? Base::end() : Base::find(k); }
++    size_type count(const Key& k) const { return is_reserved_key(k) ? 0 : Base::count(k); }
++    using Base::erase;
++    size_type erase(const Key& k) { return is_reserved_key(k) ? 0 : Base::erase(k); }
++    template<class K, class V> std::pair<iterator,bool> emplace(K&& k, V&& v) {
++        value_type value(std::forward<K>(k),std::forward<V>(v));
++        require_key(value.first);
++        return Base::insert(value);
++    }
++    // These overloads guard sentinels for the insert forms used by benchmarks.
++    std::pair<iterator,bool> insert(const value_type& v) { require_key(v.first); return Base::insert(v); }
++    std::pair<iterator,bool> insert(value_type&& v) { require_key(v.first); return Base::insert(v); }
++};
+diff --git a/src/app/main.cpp b/src/app/main.cpp
+index 3b6b3eb54de8bccb5d72e0404a4863d9722cd469..eb041ae4138665ae28c1b32fd7433f88d480c035 100644
+--- a/src/app/main.cpp
++++ b/src/app/main.cpp
+@@ -8,8 +8,12 @@ void help(std::vector<std::string> const& args) {
+ }
+ 
+ int main(int cargi, char** cargv) {
++    if (cargi == 2 && std::string(cargv[1]) == "--list") {
++        BenchRegistry::list();
++        return 0;
++    }
+     auto ret = BenchRegistry::run(cargi == 2 ? cargv[1] : "");
+-    if (ret) {
++    if (ret == -1) {
+         BenchRegistry::list();
+     }
+     exit(ret);
+diff --git a/src/benchmarks/FlatMap64.cpp b/src/benchmarks/FlatMap64.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1985c191e714179fca9b74ff4a459228d0785a7
+--- /dev/null
++++ b/src/benchmarks/FlatMap64.cpp
+@@ -0,0 +1,78 @@
++// A controlled 64-bit profile within map_benchmark's existing registry/timer.
++#include "bench.h"
++#include <algorithm>
++#include <cstdlib>
++#include <limits>
++#include <random>
++#include <stdexcept>
++#include <string>
++#include <vector>
++namespace {
++uint64_t permute64(uint64_t x) {
++    x += UINT64_C(0x9e3779b97f4a7c15);
++    x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
++    x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
++    return x ^ (x >> 31);
++}
++uint64_t nextKey(uint64_t& cursor) {
++    for (;;) {
++        auto k = permute64(cursor++);
++        // Uniform common corpus valid for both Google sentinel policies.
++        if (k < (std::numeric_limits<uint64_t>::max)() - 1) return k;
++    }
++}
++size_t entries() {
++    const char* s = std::getenv("MAP_BENCH_N");
++    size_t n = s ? std::stoull(s) : 1000000;
++    if (!n) throw std::invalid_argument("MAP_BENCH_N must be positive");
++    return n;
++}
++uint64_t seed() {
++    const char* s = std::getenv("MAP_BENCH_SEED");
++    return s ? std::stoull(s) : 42;
++}
++template<class M> auto& nativeMap(M& m) {
++#ifdef MAP_BENCH_GOOGLE_ADAPTER
++    // Input domain was validated before timing; use the native API here.
++    return static_cast<typename M::native_type&>(m);
++#else
++    return m;
++#endif
++}
++void run(Bench& bench, bool reserved) {
++    const size_t n = entries();
++    constexpr uint64_t mask = UINT64_C(0x123456789abcdef0);
++    std::vector<uint64_t> keys(n);
++    uint64_t cursor = 0, expected_sum = 0;
++    for (auto& k : keys) { k = nextKey(cursor); expected_sum += k ^ mask; }
++    const auto miss_cursor = cursor;
++    std::mt19937_64 rng(seed());
++    bench.setMemoryBaseline();
++    std::string name = std::string(reserved ? "reserve+insert" : "insert_grow") + " n=" + std::to_string(n);
++    bench.beginMeasure(name.c_str());
++    using M = Map<uint64_t,uint64_t>;
++    M map;
++    if (reserved) map.reserve(n);
++    auto& native = nativeMap(map);
++    for (auto k : keys) native.insert(typename M::value_type(k,k ^ mask));
++    bench.endMeasure(n,map.size());
++    if (!reserved) return;
++    std::shuffle(keys.begin(),keys.end(),rng);
++    uint64_t found = 0, sum = 0;
++    bench.beginMeasure("find_hit_random");
++    for (auto k : keys) {
++        auto it = native.find(k);
++        if (it != native.end()) { ++found; sum += it->second; }
++    }
++    bench.endMeasure(expected_sum,sum);
++    if (found != n) throw std::runtime_error("hit count mismatch");
++    cursor = miss_cursor;
++    for (auto& k : keys) k = nextKey(cursor);
++    found = 0;
++    bench.beginMeasure("find_miss");
++    for (auto k : keys) found += native.find(k) != native.end();
++    bench.endMeasure(0,found);
++}
++}
++BENCHMARK(FlatMap64Reserved) { run(bench,true); }
++BENCHMARK(FlatMap64Grow) { run(bench,false); }
+diff --git a/src/maps/ankerl_unordered_dense/Map.h b/src/maps/ankerl_unordered_dense/Map.h
+index 30ffbb079ec3d878646b91d5c2a953d6eaae20b1..65b4b1e94df908ee72287595c70de48ed15c1e81 100644
+--- a/src/maps/ankerl_unordered_dense/Map.h
++++ b/src/maps/ankerl_unordered_dense/Map.h
+@@ -1,7 +1,7 @@
+ #pragma once
+ 
+ #include "Hash.h"
+-#include "martinus__unordered_dense/include/ankerl/unordered_dense.h"
++#include <ankerl/unordered_dense.h>
+ 
+ static const char* MapName = "ankerl::unordered_dense::map";
+ 
+diff --git a/src/maps/ankerl_unordered_dense/dependencies.cmake b/src/maps/ankerl_unordered_dense/dependencies.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c93449d149d45b932f86321fbac4f1759f2b695
+--- /dev/null
++++ b/src/maps/ankerl_unordered_dense/dependencies.cmake
+@@ -0,0 +1 @@
++target_include_directories(${EXECUTABLE_NAME} PRIVATE "${MAP_BENCH_ANKERL_DIR}/include")
+diff --git a/src/maps/ankerl_unordered_dense_segmented/Map.h b/src/maps/ankerl_unordered_dense_segmented/Map.h
+index bb29329dee068f1b5ed246e560650d223f33b4eb..d6a7eeddc4fd36c49496b355fecf587511ab29d3 100644
+--- a/src/maps/ankerl_unordered_dense_segmented/Map.h
++++ b/src/maps/ankerl_unordered_dense_segmented/Map.h
+@@ -1,7 +1,7 @@
+ #pragma once
+ 
+ #include "Hash.h"
+-#include "martinus__unordered_dense/include/ankerl/unordered_dense.h"
++#include <ankerl/unordered_dense.h>
+ 
+ static const char* MapName = "ankerl::unordered_dense::segmented_map";
+ 
+diff --git a/src/maps/ankerl_unordered_dense_segmented/dependencies.cmake b/src/maps/ankerl_unordered_dense_segmented/dependencies.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c93449d149d45b932f86321fbac4f1759f2b695
+--- /dev/null
++++ b/src/maps/ankerl_unordered_dense_segmented/dependencies.cmake
+@@ -0,0 +1 @@
++target_include_directories(${EXECUTABLE_NAME} PRIVATE "${MAP_BENCH_ANKERL_DIR}/include")
+diff --git a/src/maps/google_dense_hash_map/Map.h b/src/maps/google_dense_hash_map/Map.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..eff5feb5a903af7a2e15a8e26f383fe8bd45e04d
+--- /dev/null
++++ b/src/maps/google_dense_hash_map/Map.h
+@@ -0,0 +1,7 @@
++#pragma once
++#include "Hash.h"
++#include "google_hash_map_adapter.h"
++#define MAP_BENCH_GOOGLE_ADAPTER 1
++static const char* MapName = "google::dense_hash_map";
++template<class Key, class Val, class H = Hash<Key>>
++using Map = GoogleMapAdapter<Key, Val, H, true>;
+diff --git a/src/maps/google_dense_hash_map/dependencies.cmake b/src/maps/google_dense_hash_map/dependencies.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e83ed1466c0777782318f17f5a229f835b2c2da
+--- /dev/null
++++ b/src/maps/google_dense_hash_map/dependencies.cmake
+@@ -0,0 +1,2 @@
++include("${CMAKE_SOURCE_DIR}/cmake/Sparsehash.cmake")
++map_bench_sparsehash(${EXECUTABLE_NAME})
+diff --git a/src/maps/google_sparse_hash_map/Map.h b/src/maps/google_sparse_hash_map/Map.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..16f90468b1dfd832a24f86279686f712688e6890
+--- /dev/null
++++ b/src/maps/google_sparse_hash_map/Map.h
+@@ -0,0 +1,7 @@
++#pragma once
++#include "Hash.h"
++#include "google_hash_map_adapter.h"
++#define MAP_BENCH_GOOGLE_ADAPTER 1
++static const char* MapName = "google::sparse_hash_map";
++template<class Key, class Val, class H = Hash<Key>>
++using Map = GoogleMapAdapter<Key, Val, H, false>;
+diff --git a/src/maps/google_sparse_hash_map/dependencies.cmake b/src/maps/google_sparse_hash_map/dependencies.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e83ed1466c0777782318f17f5a229f835b2c2da
+--- /dev/null
++++ b/src/maps/google_sparse_hash_map/dependencies.cmake
+@@ -0,0 +1,2 @@
++include("${CMAKE_SOURCE_DIR}/cmake/Sparsehash.cmake")
++map_bench_sparsehash(${EXECUTABLE_NAME})
+diff --git a/src/maps/sflat_flat_hash_map/Map.h b/src/maps/sflat_flat_hash_map/Map.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..386be5b62ceead6b3ff7fbfd1e249783ffaaa775
+--- /dev/null
++++ b/src/maps/sflat_flat_hash_map/Map.h
+@@ -0,0 +1,6 @@
++#pragma once
++#include "Hash.h"
++#include <sflat/flat_hash_map.hpp>
++static const char* MapName = "sflat::flat_hash_map";
++template<class Key, class Val, class H = Hash<Key>>
++using Map = sflat::flat_hash_map<Key, Val, H>;
+diff --git a/src/maps/sflat_flat_hash_map/dependencies.cmake b/src/maps/sflat_flat_hash_map/dependencies.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..83d76a0c3e36e3215f9ebedbf29d2411e9f393eb
+--- /dev/null
++++ b/src/maps/sflat_flat_hash_map/dependencies.cmake
+@@ -0,0 +1,2 @@
++target_include_directories(${EXECUTABLE_NAME} PRIVATE
++  "${CMAKE_SOURCE_DIR}/external/jclin168__sflat_hash_map/include")
+diff --git a/tests/adapter_smoke.cpp b/tests/adapter_smoke.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a21e0af8b2d66dea81d90d5e032f2c0af47cbb03
+--- /dev/null
++++ b/tests/adapter_smoke.cpp
+@@ -0,0 +1,42 @@
++#include "Map.h"
++#include <cstdint>
++#include <cstdio>
++#include <stdexcept>
++#include <string>
++#include <type_traits>
++#include <unordered_map>
++void require(bool b) { if (!b) throw std::runtime_error("adapter smoke mismatch"); }
++template<class K> void test(const K& missing) {
++    Map<K,uint64_t> map;
++    std::unordered_map<K,uint64_t> ref;
++    map.reserve(1000);
++    for (size_t i=0;i<1000;++i) {
++        K k;
++        if constexpr(std::is_same<K,std::string>::value) k="key-"+std::to_string(i);
++        else k=static_cast<K>(i);
++        auto a=map.emplace(k,i);auto b=ref.emplace(k,i);
++        require(a.second==b.second);
++        require(!map.emplace(k,i+1).second);
++    }
++    require(map.size()==ref.size()&&map.find(missing)==map.end());
++    const auto& c=map;
++    for(const auto& kv:ref)require(c.find(kv.first)!=c.end()&&c.find(kv.first)->second==kv.second);
++    auto copy=map;
++    for(auto it=ref.begin();it!=ref.end();) {
++        auto k=it->first;
++        if(it->second%2==0) {require(map.erase(k)==1);it=ref.erase(it);}else ++it;
++    }
++    require(copy.size()==1000&&map.size()==ref.size());
++    uint64_t sum=0,expected=0;
++    for(auto& kv:map)sum+=kv.second;
++    for(auto& kv:ref)expected+=kv.second;
++    require(sum==expected);
++    auto k=map.begin()->first;map.erase(map.begin());ref.erase(k);require(map.size()==ref.size());
++    map.clear();require(map.empty());map[missing]=123;require(map.find(missing)->second==123);
++#ifdef MAP_BENCH_GOOGLE_ADAPTER
++    bool rejected=false;
++    try {map[GoogleBenchmarkMarkers<K>::deleted()]=1;}catch(const std::invalid_argument&){rejected=true;}
++    require(rejected);
++#endif
++}
++int main(){test<uint64_t>(9000000);test<int>(9000000);test<std::string>("absent");std::puts("adapter smoke PASS");}
+diff --git a/tools/build_flat64.sh b/tools/build_flat64.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..10f0c96793084f2e984c1d93b31c346a6899603a
+--- /dev/null
++++ b/tools/build_flat64.sh
+@@ -0,0 +1,13 @@
++#!/usr/bin/env bash
++set -euo pipefail
++repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
++profile_build_dir=${MAP_BENCH_BUILD_DIR:-"${repo_dir}/build-flat64"}
++profile_cmake=${MAP_BENCH_CMAKE:-cmake}
++profile_args=(-S "$repo_dir" -B "$profile_build_dir" -DCMAKE_BUILD_TYPE=Release
++  '-DMAP_BENCH_MAPS=sflat_flat_hash_map;boost_unordered_flat_map;ankerl_unordered_dense;abseil_flat_hash_map;google_dense_hash_map;google_sparse_hash_map'
++  -DMAP_BENCH_HASHES=std_hash -DMAP_BENCH_SFLAT_SEED=1)
++if [[ -n ${MAP_BENCH_BOOST_SOURCE_DIR:-} ]]; then
++  profile_args+=("-DMAP_BENCH_BOOST_SOURCE_DIR=${MAP_BENCH_BOOST_SOURCE_DIR}")
++fi
++"$profile_cmake" "${profile_args[@]}"
++"$profile_cmake" --build "$profile_build_dir" --target std_hash_all -j "${MAP_BENCH_BUILD_JOBS:-2}"
+diff --git a/tools/insert_stream.cpp b/tools/insert_stream.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..be1d1dda59ba2b8469ad0942144c755382c0e405
+--- /dev/null
++++ b/tools/insert_stream.cpp
+@@ -0,0 +1,62 @@
++// Streaming no-reserve insertion: no O(N) input allocation.
++#include "bench.h"
++#include <cstdio>
++#include <new>
++#include <limits>
++uint64_t permute(uint64_t x) {
++    x += UINT64_C(0x9e3779b97f4a7c15);
++    x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
++    x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
++    return x ^ (x >> 31);
++}
++// Linux VmSize includes all mapped/reserved address space, resident or not.
++std::pair<size_t,size_t> virtualMemory() {
++    std::ifstream status("/proc/self/status");
++    std::string line;
++    size_t size_kib=0, peak_kib=0;
++    while (std::getline(status,line)) {
++        if (line.compare(0,7,"VmSize:")==0) size_kib=std::stoull(line.substr(7));
++        if (line.compare(0,7,"VmPeak:")==0) peak_kib=std::stoull(line.substr(7));
++    }
++    if (!size_kib || !peak_kib) throw std::runtime_error("Cannot read Linux VmSize/VmPeak");
++    return {size_kib*1024,peak_kib*1024};
++}
++int main(int argc, char** argv) {
++    const uint64_t n = argc > 1 ? std::stoull(argv[1]) : 500000000;
++    const auto baseline_vm = virtualMemory().first;
++    const auto baseline = getCurrentRSS();
++    auto start = Bench::clock::now();
++    uint64_t completed = 0, cursor = 0;
++    auto report = [&](const char* status) {
++        auto current = getCurrentRSS(), peak = getPeakRSS();
++        const auto vm = virtualMemory();
++        std::printf("%s,%llu,%.6f,%zu,%zu,%zu,%zu,%zu,%zu\n", status,
++            (unsigned long long)completed,
++            std::chrono::duration<double>(Bench::clock::now()-start).count(),
++            current, peak, baseline, vm.first, vm.second, baseline_vm);
++        std::fflush(stdout);
++    };
++    std::puts("status,inserted,elapsed_s,rss_bytes,peak_bytes,baseline_bytes,vmsize_bytes,vmpeak_bytes,baseline_vmsize_bytes");
++    using M = Map<uint64_t,uint64_t>;
++    M map;
++#ifdef MAP_BENCH_GOOGLE_ADAPTER
++    auto& native = static_cast<typename M::native_type&>(map);
++#else
++    auto& native = map;
++#endif
++    try {
++        while (completed < n) {
++            const auto k = permute(cursor++);
++            if (k >= (std::numeric_limits<uint64_t>::max)()-1) continue;
++            native.insert(typename M::value_type(k,k ^ UINT64_C(0x123456789abcdef0)));
++            ++completed;
++            if (completed % 10000000 == 0) report("checkpoint");
++        }
++        if (native.size() != n) return 3;
++        report("completed");
++    } catch (const std::bad_alloc&) {
++        report("allocation_failed");
++        // Some native containers do not preserve destructibility after OOM.
++        std::_Exit(2);
++    }
++}
+diff --git a/tools/run_flat64.py b/tools/run_flat64.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..67a83db4afffdbf7b3faebc33f244e78d3ced828
+--- /dev/null
++++ b/tools/run_flat64.py
+@@ -0,0 +1,104 @@
++#!/usr/bin/env python3
++"""Run selected map_benchmark binaries in fresh, sequential, pinned processes."""
++import argparse,csv,hashlib,json,math,os,random,subprocess,time
++from pathlib import Path
++ROOT=Path(__file__).resolve().parents[1]
++ADAPTERS=['sflat_flat_hash_map','boost_unordered_flat_map','ankerl_unordered_dense','abseil_flat_hash_map','google_dense_hash_map','google_sparse_hash_map']
++FIELDS=['map','hash','test','measurement_id','measurement','actual_result','runtime_s','legacy_peak_delta_mib','rss_current_mib','rss_minus_input_baseline_mib','rss_peak_mib','rss_input_baseline_mib','rss_peak_minus_input_baseline_mib']
++
++def git_sha(path):
++    return subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD'],text=True).strip()
++def metadata(build,cpu):
++    repos={'map_benchmark':ROOT,'sflat':ROOT/'external/jclin168__sflat_hash_map','google_sparsehash':ROOT/'external/google__sparsehash','ankerl':ROOT/'external/martinus__unordered_dense','abseil':ROOT/'external/abseil__abseil-cpp'}
++    cache=(build/'CMakeCache.txt').read_text()
++    cache_values={line.split(':',1)[0]:line.split('=',1)[1] for line in cache.splitlines() if not line.startswith(('#','//')) and ':' in line and '=' in line}
++    compiler=cache_values.get('CMAKE_CXX_COMPILER','g++')
++    target_flags={}
++    for a in ADAPTERS:
++        flagfile=build/'CMakeFiles'/f'bench_{a}__std_hash.dir'/'flags.make'
++        if flagfile.exists():
++            target_flags[a]='\n'.join(line for line in flagfile.read_text().splitlines() if line.startswith(('CXX_DEFINES','CXX_FLAGS')))
++        else:
++            target_flags[a]='CMake cache fallback: '+json.dumps({k:cache_values.get(k,'') for k in ['CMAKE_CXX_FLAGS','CMAKE_CXX_FLAGS_RELEASE','MAP_BENCH_SFLAT_SEED']},sort_keys=True)
++    for line in cache.splitlines():
++        for key,label in [('MAP_BENCH_ANKERL_DIR:PATH=','ankerl'),('MAP_BENCH_ABSEIL_DIR:PATH=','abseil'),('MAP_BENCH_BOOST_SOURCE_DIR:PATH=','boost')]:
++            if line.startswith(key) and line[len(key):]:repos[label]=Path(line[len(key):])
++    files=[ROOT/'CMakeLists.txt',ROOT/'src/app/bench.h',ROOT/'src/app/getRSS.cpp',ROOT/'src/benchmarks/FlatMap64.cpp',ROOT/'src/app/google_hash_map_adapter.h']
++    binaries={a:hashlib.sha256((build/f'bench_{a}__std_hash').read_bytes()).hexdigest() for a in ADAPTERS}
++    return {'binary_sha256':binaries,'commits':{k:git_sha(v) for k,v in repos.items()},'source_sha256':{str(f.relative_to(ROOT)):hashlib.sha256(f.read_bytes()).hexdigest() for f in files},'cpu_affinity':cpu,'cpu':subprocess.check_output(['lscpu'],text=True),'compiler':subprocess.check_output([compiler,'--version'],text=True),'target_compile_flags':target_flags,'thp':Path('/sys/kernel/mm/transparent_hugepage/enabled').read_text().strip(),'cgroup_memory_max':Path('/sys/fs/cgroup/memory.max').read_text().strip(),'build_directory':str(build),'flags':'C++17; std::hash; actual flags in target_compile_flags','timestamp_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
++def parse_output(stdout):
++    rows=[]
++    for line in stdout.splitlines():
++        fields=next(csv.reader([line],delimiter=';',skipinitialspace=True))
++        if len(fields)!=len(FIELDS):raise RuntimeError('Unexpected benchmark row: '+line)
++        row=dict(zip(FIELDS,fields))
++        int(row['actual_result'])
++        for k in FIELDS[6:]:
++            if not math.isfinite(float(row[k])):raise RuntimeError('Non-finite measurement: '+line)
++        rows.append(row)
++    return rows
++
++def main():
++    ap=argparse.ArgumentParser(description=__doc__)
++    ap.add_argument('--build-dir',type=Path,default=ROOT/'build-flat64')
++    ap.add_argument('--out',type=Path,default=ROOT/'results-flat64')
++    ap.add_argument('--sizes',type=int,nargs='+',default=[1000000,10000000,100000000])
++    ap.add_argument('--repeats',type=int,default=3)
++    ap.add_argument('--cpu',type=int,default=None)
++    ap.add_argument('--timeout',type=int,default=1800)
++    ap.add_argument('--resume',action='store_true')
++    ap.add_argument('--native-only',action='store_true',help='Run two original upstream cases once per adapter')
++    args=ap.parse_args()
++    if any(n<=0 for n in args.sizes) or args.repeats<=0:ap.error('sizes and repeats must be positive')
++    build=args.build_dir.resolve();out=args.out.resolve();out.mkdir(parents=True,exist_ok=True);(out/'raw').mkdir(exist_ok=True)
++    cpu=args.cpu if args.cpu is not None else min(os.sched_getaffinity(0))
++    for a in ADAPTERS:
++        if not (build/f'bench_{a}__std_hash').is_file():ap.error('Missing executable for '+a)
++    manifest=metadata(build,cpu)
++    manifest['native_only']=args.native_only;manifest['sizes']=args.sizes;manifest['repeats']=1 if args.native_only else args.repeats
++    previous=out/'environment.json'
++    if args.resume and previous.exists():
++        old=json.loads(previous.read_text())
++        for key in ['binary_sha256','commits','source_sha256','flags','compiler','target_compile_flags','cpu','cpu_affinity','native_only','sizes','repeats']:
++            if old.get(key)!=manifest.get(key):
++                raise RuntimeError('Cannot resume with changed build/configuration: '+key)
++        for key in ['measurement_source_sha256','integration_validation']:
++            if key in old:manifest[key]=old[key]
++    (out/'environment.json').write_text(json.dumps(manifest,indent=2))
++    jobs=[]
++    if args.native_only:
++        jobs=[(a,0,case,0) for a in ADAPTERS for case in ['CtorDtorSingleEntryMap','AccidentallyQuadratic']]
++    else:
++        for n in args.sizes:
++            for repeat in range(args.repeats):
++                batch=[(a,n,case,repeat) for a in ADAPTERS for case in ['FlatMap64Reserved','FlatMap64Grow']]
++                random.Random(20261109+n+repeat).shuffle(batch);jobs+=batch
++    for index,(adapter,n,case,repeat) in enumerate(jobs,1):
++        key=f'{adapter}__{case}__{n}__{repeat}'
++        checkpoint=out/'raw'/f'{key}.json'
++        if args.resume and checkpoint.exists():
++            print(f'[{index}/{len(jobs)}] cached {key}',flush=True);continue
++        seed=42+repeat
++        env=dict(os.environ,MAP_BENCH_N=str(n),MAP_BENCH_SEED=str(seed),MAP_BENCH_EXTRA_MEMORY='1')
++        command=['taskset','-c',str(cpu),str(build/f'bench_{adapter}__std_hash'),case]
++        print(f'[{index}/{len(jobs)}] {adapter} {case} N={n} repeat={repeat+1}',flush=True)
++        start=time.monotonic()
++        result=subprocess.run(command,env=env,text=True,capture_output=True,timeout=args.timeout)
++        (out/'raw'/f'{key}.txt').write_text(result.stdout)
++        (out/'raw'/f'{key}.stderr').write_text(result.stderr)
++        if result.returncode:raise RuntimeError(f'{key}: exit {result.returncode}: {result.stderr}')
++        rows=parse_output(result.stdout)
++        expected=3 if case in ['FlatMap64Reserved','AccidentallyQuadratic'] else 1
++        if len(rows)!=expected:raise RuntimeError(f'{key}: expected {expected} measurements')
++        for row in rows:row.update(adapter=adapter,entries=n,repeat=repeat+1,seed=seed,process_wall_s=time.monotonic()-start)
++        temporary=checkpoint.with_suffix('.tmp')
++        temporary.write_text(json.dumps(rows,indent=2))
++        temporary.replace(checkpoint)
++        print('  '+', '.join(f"{r['measurement']}: {r['runtime_s']}s, RSS-baseline {r['rss_minus_input_baseline_mib']} MiB" for r in rows),flush=True)
++    allrows=[]
++    for adapter,n,case,repeat in jobs:
++        allrows+=json.loads((out/'raw'/f'{adapter}__{case}__{n}__{repeat}.json').read_text())
++    with (out/'raw.csv').open('w') as f:
++        w=csv.DictWriter(f,fieldnames=list(allrows[0]));w.writeheader();w.writerows(allrows)
++    print(f'Completed {len(jobs)} processes, {len(allrows)} measurements. {out}',flush=True)
++if __name__=='__main__':main()
+diff --git a/tools/run_insert_stream.py b/tools/run_insert_stream.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..fff86d585a318df7422d3ecd4ae83dfc171eb9a0
+--- /dev/null
++++ b/tools/run_insert_stream.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python3
++"""Build separate streaming insert probes using existing CMake target flags/libraries."""
++import argparse,csv,hashlib,json,os,resource,shlex,subprocess,time
++from pathlib import Path
++from run_flat64 import ADAPTERS,ROOT,metadata
++p=argparse.ArgumentParser(description=__doc__)
++p.add_argument('--entries',type=int,default=500000000)
++p.add_argument('--limit-gib',type=float,default=7)
++p.add_argument('--rss-limit-gib',type=float,default=0,help='Sampled process RSS watchdog; 0 disables. Not a virtual-address limit.')
++p.add_argument('--cgroup-limit-gib',type=float,default=0,help='Sampled total cgroup memory watchdog; 0 disables.')
++p.add_argument('--timeout',type=int,default=3600)
++p.add_argument('--out',type=Path,default=ROOT/'results-flat64-500m')
++a=p.parse_args()
++if a.entries <= 0 or min(a.limit_gib,a.rss_limit_gib,a.cgroup_limit_gib) < 0 or a.timeout <= 0: p.error('entries/timeout must be positive; limit-gib must be nonnegative')
++out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
++build=ROOT/'build-flat64'; dest=ROOT/'build-flat64-stream';dest.mkdir(exist_ok=True)
++cpu=min(os.sched_getaffinity(0));limit=int(a.limit_gib*2**30)
++manifest=metadata(build,cpu)
++manifest.update(inherited_rlimit_as=resource.getrlimit(resource.RLIMIT_AS),entries=a.entries,limit_address_space_bytes=limit,rss_limit_bytes=int(a.rss_limit_gib*2**30),cgroup_watchdog_bytes=int(a.cgroup_limit_gib*2**30),watchdog_poll_seconds=0.005,runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),input='streaming bijective uint64; no input vector; no reserve; includes key generation and checkpoint overhead',source_sha256_stream=hashlib.sha256((ROOT/'tools/insert_stream.cpp').read_bytes()).hexdigest())
++(out/'environment.json').write_text(json.dumps(manifest,indent=2))
++(out/'insert_stream.measured.cpp').write_bytes((ROOT/'tools/insert_stream.cpp').read_bytes())
++(out/'memory.events.before').write_text(Path('/sys/fs/cgroup/memory.events').read_text())
++results=[]
++for adapter in ADAPTERS:
++    target=f'bench_{adapter}__std_hash'; td=build/'CMakeFiles'/f'{target}.dir'
++    flags={line.split(' = ',1)[0]:line.split(' = ',1)[1] for line in (td/'flags.make').read_text().splitlines() if ' = ' in line}
++    obj=dest/f'{adapter}.o'; binary=dest/adapter
++    subprocess.run(['/usr/bin/c++',*shlex.split(' '.join(flags[k] for k in ['CXX_DEFINES','CXX_INCLUDES','CXX_FLAGS'])),'-c',str(ROOT/'tools/insert_stream.cpp'),'-o',str(obj)],check=True)
++    original=shlex.split((td/'link.txt').read_text()); tail=original[original.index('-o')+2:]
++    subprocess.run([original[0],'-O3','-march=native',str(obj),str(td/'src/app/getRSS.cpp.o'),'-o',str(binary),*tail],cwd=build,check=True)
++    print('START',adapter,'N',a.entries,flush=True)
++    def constraints():
++        if limit: resource.setrlimit(resource.RLIMIT_AS,(limit,limit))
++        resource.setrlimit(resource.RLIMIT_CORE,(0,0))
++        os.sched_setaffinity(0,{cpu})
++    begin=time.monotonic(); reason=None; observed_rss=0; observed_hwm=0; observed_cgroup=0; observed_vms=0; observed_vmpeak=0; stop_snapshot=None
++    with (out/f'{adapter}.csv').open('w') as stdout, (out/f'{adapter}.stderr').open('w') as stderr:
++        process=subprocess.Popen([str(binary),str(a.entries)],stdout=stdout,stderr=stderr,preexec_fn=constraints)
++        while process.poll() is None:
++            try:
++                fields={line.split(':',1)[0]:line.split(':',1)[1].strip() for line in Path(f'/proc/{process.pid}/status').read_text().splitlines() if ':' in line}
++                rss=int(fields.get('VmRSS','0 kB').split()[0])*1024
++                hwm=int(fields.get('VmHWM','0 kB').split()[0])*1024
++                vms=int(fields.get('VmSize','0 kB').split()[0])*1024
++                vmpeak=int(fields.get('VmPeak','0 kB').split()[0])*1024
++                observed_vms=max(observed_vms,vms);observed_vmpeak=max(observed_vmpeak,vmpeak)
++                cg=int(Path('/sys/fs/cgroup/memory.current').read_text())
++                observed_rss=max(observed_rss,rss);observed_hwm=max(observed_hwm,hwm);observed_cgroup=max(observed_cgroup,cg)
++                if a.rss_limit_gib and rss > a.rss_limit_gib*2**30: reason='rss_watchdog'
++                elif a.cgroup_limit_gib and cg > a.cgroup_limit_gib*2**30: reason='cgroup_watchdog'
++                elif time.monotonic()-begin > a.timeout: reason='timeout'
++                if reason:
++                    stop_snapshot={'rss_bytes':rss,'rss_hwm_bytes':hwm,'vmsize_bytes':vms,'vmpeak_bytes':vmpeak,'cgroup_bytes':cg,'elapsed_s':time.monotonic()-begin}
++                    process.kill();break
++            except (FileNotFoundError, ProcessLookupError): pass
++            time.sleep(.005)
++        rc=process.wait()
++    rows=list(csv.DictReader((out/f'{adapter}.csv').open()))
++    result={'map':adapter,'returncode':rc,'stop_reason':reason or ('completed' if rc==0 else 'process_error'),'observed_rss_max_bytes':observed_rss,'observed_hwm_max_bytes':observed_hwm,'observed_cgroup_max_bytes':observed_cgroup,'observed_vmsize_max_bytes':observed_vms,'observed_vmpeak_max_bytes':observed_vmpeak,'stop_snapshot':stop_snapshot,'wall_s':time.monotonic()-begin,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'last':rows[-1] if rows else None}
++    results.append(result);(out/'results.json').write_text(json.dumps(results,indent=2))
++    print(json.dumps(result),flush=True)
++
++(out/'memory.events.after').write_text(Path('/sys/fs/cgroup/memory.events').read_text())
+diff --git a/tools/summarize_flat64.py b/tools/summarize_flat64.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..4f05ca50b4828f9dc342c030601472c0bd52942e
+--- /dev/null
++++ b/tools/summarize_flat64.py
+@@ -0,0 +1,132 @@
++#!/usr/bin/env python3
++"""Aggregate independent map_benchmark flat64 processes and preserve min/max."""
++import csv,json,statistics,collections,sys,os
++from pathlib import Path
++from run_flat64 import ADAPTERS
++LABELS={'sflat_flat_hash_map':'sflat','boost_unordered_flat_map':'Boost flat','ankerl_unordered_dense':'Ankerl','abseil_flat_hash_map':'Abseil flat','google_dense_hash_map':'Google dense','google_sparse_hash_map':'Google sparse'}
++def median(rows,key):return statistics.median(float(r[key]) for r in rows)
++def summarize(out):
++    manifest=json.loads((out/'environment.json').read_text())
++    rows=list(csv.DictReader((out/'raw.csv').open()))
++    if manifest.get('native_only'):raise ValueError('Use the controlled profile output directory')
++    sizes=manifest['sizes'];repeats=manifest['repeats']
++    assert len(rows)==len(ADAPTERS)*len(sizes)*repeats*4
++    groups=collections.defaultdict(list)
++    for r in rows:groups[r['adapter'],int(r['entries']),r['test'],r['measurement_id']].append(r)
++    for v in groups.values():assert len(v)==repeats
++    for n in sizes:
++        hits=[r for r in rows if int(r['entries'])==n and r['measurement_id']=='02']
++        assert len({r['actual_result'] for r in hits})==1
++    summaries=[]
++    for a in ADAPTERS:
++        for n in sizes:
++            rs=groups[a,n,'FlatMap64Reserved','01'];hit=groups[a,n,'FlatMap64Reserved','02'];miss=groups[a,n,'FlatMap64Reserved','03'];grow=groups[a,n,'FlatMap64Grow','01']
++            item={'adapter':a,'map':LABELS[a],'entries':n,'processes_per_case':repeats}
++            for name,data,key in [('insert_s',rs,'runtime_s'),('hit_s',hit,'runtime_s'),('miss_s',miss,'runtime_s'),('steady_rss_mib',rs,'rss_minus_input_baseline_mib'),('reserved_peak_mib',rs,'rss_peak_minus_input_baseline_mib'),('grow_s',grow,'runtime_s'),('grow_steady_mib',grow,'rss_minus_input_baseline_mib'),('grow_peak_mib',grow,'rss_peak_minus_input_baseline_mib')]:
++                values=[float(r[key]) for r in data];item[name]=statistics.median(values);item[name+'_min']=min(values);item[name+'_max']=max(values)
++            item['steady_bytes_per_entry']=item['steady_rss_mib']*1048576/n
++            summaries.append(item)
++    with (out/'summary.csv').open('w') as f:
++        w=csv.DictWriter(f,fieldnames=summaries[0]);w.writeheader();w.writerows(summaries)
++    lookup={(r['adapter'],r['entries']):r for r in summaries}
++    commits=manifest['commits']
++    cpu_name=next((line.split(':',1)[1].strip() for line in manifest['cpu'].splitlines() if line.startswith('Model name:')),'See environment.json')
++    compiler_name=manifest['compiler'].splitlines()[0]
++    seed_list=', '.join(str(42+i) for i in range(repeats))
++    report=f'''# map_benchmark 六種 flat hash table 實測
++
++已在 martinus/map_benchmark（基底 commit {commits['map_benchmark'][:12]}）加入 sflat、Google dense、Google sparse adapters，並加入既有 BenchRegistry/計時器中的 64-bit 比較測項。六個目標均編譯全部原有 benchmark source；本輪執行受控 64-bit profile 與兩個原有測項作相容性檢查，沒有宣稱已跑完所有原有 workloads。
++
++## 測試條件
++
++- {cpu_name}；{compiler_name}；C++17、-O3 -DNDEBUG -march=native。
++- 六者共用 std::hash adapter；保留各容器內部的 hash mixing、預設 load factor、allocator 與 THP 行為。sflat 使用可重現的 SFLAT_PROCESS_SEED=1，沒有套用前次實驗 patch。
++- uint64_t → uint64_t，唯一隨機分布 key。所有容器使用相同輸入與查詢，排除 Google 的兩個保留 marker；未命中 key 與插入 key 由同一雙射的不重疊區段生成。
++- 每個 map/size/case {repeats} 次獨立程序；每次只有一個 benchmark 程序，固定 CPU affinity，隨機化 map/case 順序。查詢 shuffle seeds 為 {seed_list}。
++- Reserved：reserve(N)+N 次 native value_type insert、N 次打亂順序的 hit、N 次 miss。Grow：從空表插入 N 次，不 reserve。資料生成、shuffle、RSS 讀取及析構不計入這些測項時間；建表包含 constructor、reserve 及 page faults。
++- Google 原生 API 沒有 emplace/reserve；一般 adapter 提供相容包裝。本受控測項以已驗證的共同 key domain 直接使用 Google native insert/find，避免把 adapter sentinel 檢查開銷計入比較。
++- 記憶體上限 8 GiB，THP=madvise。實際 CPU/編譯器/commit/build flags 等完整資料保存在 environment.json。
++
++## 版本
++
++'''
++    for name,sha in commits.items():report+=f'- {name}: `{sha}`\n'
++    report+='''
++Ankerl 為 5.3.3，Abseil 為 LTS 20250814.1，Google sparsehash 為 2.0.4；Boost 使用本機 1.93 開發版 modular headers。sflat 為取得時最新版。這些實作沒有改負載因子或使用特殊 allocator。
++
++## Reserved runtime 與常駐記憶體
++
++數字為獨立程序的中位數，時間單位秒。RSS 單位 MiB（2^20 bytes），是在 insert 完成、map 仍存活時量測，扣除 input key vector 與程序基準。RSS 包含 allocator、頁面 rounding 和少量 runtime first-touch，不是精確 logical allocation bytes。
++
++'''
++    for n in sizes:
++        report+=f'### {n:,} entries\n\n| Map | reserve+insert s | find hit s | find miss s | steady RSS MiB |\n|---|---:|---:|---:|---:|\n'
++        for a in ADAPTERS:
++            r=lookup[a,n];report+=f"| {LABELS[a]} | {r['insert_s']:.4f} | {r['hit_s']:.4f} | {r['miss_s']:.4f} | {r['steady_rss_mib']:.1f} |\n"
++        report+='\n'
++    report+='''## 自動擴容建表與峰值
++
++Peak 是程序累積 ru_maxrss 減掉輸入準備後的 baseline current RSS，為建表峰值估計，不是逐 allocation profiler；原始欄位也保留絕對 current/peak RSS。
++
++| Entries | Map | insert without reserve s | end RSS MiB | estimated peak MiB |
++|---|---|---:|---:|---:|
++'''
++    for n in sizes:
++        for a in ADAPTERS:
++            r=lookup[a,n];report+=f"| {n:,} | {LABELS[a]} | {r['grow_s']:.4f} | {r['grow_steady_mib']:.1f} | {r['grow_peak_mib']:.1f} |\n"
++    report+='''
++## 如何解讀記憶體
++
++原 Bench 的第八欄是從 benchmark 開始計算的累積 peak 增量；在新測項中它還包含輸入陣列，不能當成單一 map 的 steady memory。本次保留該欄位，額外記錄 current RSS、input baseline、扣基準的 current RSS、絕對 peak 和扣基準的 peak。
++
++主要比較以 insert 後的 current RSS 減 baseline 為準。成長時 old/new table、allocator 留存會反映在 peak；lookup 階段通常不增長，但逐階段數字均有記錄。smaps_rollup 的 current RSS 與 getrusage 的 peak 使用不同 kernel accounting，可能有小差距。小規模測試的 peak 可能受程序啟動高水位影響，不能外推。
++
++## 原有測項相容性檢查
++
++六者皆通過 adapter CTest（整數/字串、重複插入、find、copy、erase、迭代、clear、Google sentinel 拒絕）。小規模 1000-entry profile 完成 12 個程序、24 個測量，並確認未開 extra-memory 時仍輸出原本八欄。
++
++另對六者各執行一次原有 CtorDtorSingleEntryMap 與 AccidentallyQuadratic。這些不是三輪中位數，也不是與上述 64-bit 測項相同的工作負載；它們保留原始資料與 expected-result 驗證。原有所有 workload 未全部執行。
++
++'''
++    native=out.parent/'results-flat64-native'/'raw.csv'
++    if native.exists():
++        nr=list(csv.DictReader(native.open()));assert len(nr)==24
++        ng=collections.defaultdict(list)
++        for r in nr:ng[r['adapter'],r['test'],r['measurement_id']].append(r)
++        report+='| Map | 5M single-entry ctor/dtor s | 10M int insert s | iterate s | iterate-and-copy s |\n|---|---:|---:|---:|---:|\n'
++        for a in ADAPTERS:
++            get=lambda case,phase:float(ng[a,case,phase][0]['runtime_s'])
++            report+=f"| {LABELS[a]} | {get('CtorDtorSingleEntryMap','01'):.4f} | {get('AccidentallyQuadratic','01'):.4f} | {get('AccidentallyQuadratic','02'):.4f} | {get('AccidentallyQuadratic','03'):.4f} |\n"
++    report+='''
++## 限制與重跑
++
++- 共享 VM 有計時波動。summary.csv 保留 min/max；圖的誤差棒也是 min/max，不是信賴區間。不要把小差距當成穩定優勢。
++- 這是 std::hash、均勻整數輸入的第一輪比較；字串、其他 hash、mixed update 與其餘原有 benchmarks 可能改變排序。
++- Google dense/sparse 有原生 sentinel key 限制。共同輸入排除了 marker；一般相容 wrapper 會拒絕 marker 插入。不能假設所有原有 workload 都避開它們。
++- 100M 實測成功不代表已測過 1B。本輪沒有外推 1B runtime。
++- 詳細設定與欄位定義見 docs/FLAT64.md。執行 tools/build_flat64.sh、ctest、tools/run_flat64.py 與 tools/summarize_flat64.py 可重跑；source/dependency SHAs 與 raw checkpoints 都有保留。
++'''
++    (out/'REPORT.zh-TW.md').write_text(report)
++    # A standalone figure covering both runtime and resident memory at each N.
++    os.environ.setdefault('MPLCONFIGDIR','/tmp/map-benchmark-flat64-mpl')
++    import matplotlib
++    matplotlib.use('Agg')
++    import matplotlib.pyplot as plt
++    fig,axes=plt.subplots(2,len(sizes),figsize=(6*len(sizes),9),layout='constrained',squeeze=False)
++    labels=[LABELS[a] for a in ADAPTERS]
++    for j,n in enumerate(sizes):
++        ax=axes[0,j]
++        for k,(field,label) in enumerate([('insert_s','Insert (reserved)'),('hit_s','Find hit'),('miss_s','Find miss')]):
++            vals=[lookup[a,n][field]*1e9/n for a in ADAPTERS]
++            lows=[(lookup[a,n][field]-lookup[a,n][field+'_min'])*1e9/n for a in ADAPTERS]
++            highs=[(lookup[a,n][field+'_max']-lookup[a,n][field])*1e9/n for a in ADAPTERS]
++            ax.bar([i+(k-1)*.25 for i in range(len(ADAPTERS))],vals,width=.25,yerr=[lows,highs],capsize=2,label=label)
++        ax.set_xticks(range(len(labels)),labels,rotation=25,ha='right');ax.set(title=f'{n:,} entries',ylabel='ns / operation (log scale)',yscale='log');ax.grid(axis='y',alpha=.2);ax.set_axisbelow(True)
++        if j==0:ax.legend(fontsize=8)
++        ax=axes[1,j]
++        ax.bar(range(len(labels)),[lookup[a,n]['steady_rss_mib'] for a in ADAPTERS],color=['#277da8','#7cb59c','#efbe68','#9984b4','#e08373','#8b9da5'])
++        ax.set_xticks(range(len(labels)),labels,rotation=25,ha='right');ax.set(ylabel='Steady RSS minus input baseline (MiB)');ax.grid(axis='y',alpha=.2);ax.set_axisbelow(True)
++    fig.suptitle('map_benchmark | uint64_t -> uint64_t | shared std::hash adapter\nXeon Platinum 8573C, GCC 14.2 -O3 -march=native | median of independent processes; error bars min-max')
++    fig.savefig(out/'comparison.png',dpi=180);fig.savefig(out/'comparison.pdf')
++    print((out/'REPORT.zh-TW.md').read_text())
++if __name__=='__main__':summarize(Path(sys.argv[1] if len(sys.argv)>1 else 'results-flat64').resolve())
+diff --git a/tools/summarize_insert_rss.py b/tools/summarize_insert_rss.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..117ccb5ca135326602b4c1475bc034ea8c8b5a6f
+--- /dev/null
++++ b/tools/summarize_insert_rss.py
+@@ -0,0 +1,26 @@
++#!/usr/bin/env python3
++"""Report completed insert RSS separately from incomplete RSS-limited attempts."""
++import argparse,csv,json
++from pathlib import Path
++p=argparse.ArgumentParser();p.add_argument('directory',type=Path);a=p.parse_args();d=a.directory
++m=json.loads((d/'environment.json').read_text());results=json.loads((d/'results.json').read_text())
++assert m['limit_address_space_bytes']==0 and m['inherited_rlimit_as']==[-1,-1]
++n=m['entries']; names=dict(zip(['sflat_flat_hash_map','boost_unordered_flat_map','ankerl_unordered_dense','abseil_flat_hash_map','google_dense_hash_map','google_sparse_hash_map'],['sflat','Boost flat','Ankerl dense','Abseil flat','Google dense','Google sparse']))
++assert len(results)==len(names)
++rows=[]
++for r in results:
++    last=r['last']; complete=r['returncode']==0 and last and last['status']=='completed' and int(last['inserted'])==n
++    baseline=int(last['baseline_bytes']) if last else 0
++    peak=max(r['observed_hwm_max_bytes'],int(last['peak_bytes']) if last else 0)
++    rows.append(dict(map=names[r['map']],target_entries=n,completed=bool(complete),stop_reason=r['stop_reason'],returncode=r['returncode'],last_confirmed_entries=int(last['inserted']) if last else 0,final_rss_delta_gib=(int(last['rss_bytes'])-baseline)/2**30 if complete else '',peak_delta_gib=max(0,peak-baseline)/2**30,peak_is_lower_bound=not complete,observed_cgroup_max_gib=r['observed_cgroup_max_bytes']/2**30,completed_elapsed_s=float(last['elapsed_s']) if complete else ''))
++with (d/'summary.csv').open('w') as f:
++    w=csv.DictWriter(f,fieldnames=rows[0]);w.writeheader();w.writerows(rows)
++count=sum(x['completed'] for x in rows)
++lines=[f'# {n/1e6:g}M 不 reserve insert：實際 RSS 監控測試','',f'目標 {n:,} entries；完成 {count}/6。uint64_t → uint64_t、從空表 native insert、不 reserve、不 find。即時產生唯一 key，不配置輸入陣列；共同排除 Google markers。每個 map 執行一次獨立程序，共用 std::hash、CPU affinity 與先前版本/編譯設定。記憶體讀取/進度輸出每 10M 筆，elapsed 包含 key 生成與監控/進度開銷。','',f'**未限制虛擬位址空間**：RLIMIT_AS inherited soft/hard 均為 unlimited，程式未設定 RLIMIT_AS。監控程序每約 {m["watchdog_poll_seconds"]*1000:g} ms 讀 /proc/PID/status 的 VmRSS/VmHWM；程序 RSS 預算 {m["rss_limit_bytes"]/2**30:g} GiB，整個環境 memory.current 保護線 {m["cgroup_watchdog_bytes"]/2**30:g} GiB。超過任一線即 SIGKILL。環境另有 8 GiB cgroup 硬限制，無 swap。這是取樣監控，並非 Linux RLIMIT_RSS（Linux 不會強制該值）；峰值可能稍超過門檻。','', '| Map | 完成目標 | 最後確認插入數 | 完成後 RSS GiB | 嘗試期間 peak GiB | 停止原因 |','|---|---|---:|---:|---:|---|']
++for r in rows:
++    rss=f'{r["final_rss_delta_gib"]:.3f}' if r['completed'] else '—'
++    peak=('≥' if r['peak_is_lower_bound'] else '')+f'{r["peak_delta_gib"]:.3f}'
++    lines.append(f'| {r["map"]} | {"是" if r["completed"] else "否"} | {r["last_confirmed_entries"]:,} | {rss} | {peak} | {r["stop_reason"]} |')
++lines+=['', 'RSS/peak 均扣除 map 建立前的程序 baseline。完成者 RSS 在最後一次 insert 完成、map 仍存活時由 smaps_rollup 讀取；完整插入過程 peak 採程序 getrusage 與監控到的 VmHWM 最大值。未完成者沒有目標規模的完成後 RSS；表中 peak 是監控取到的下界，最後確認筆數是最後已輸出的 10M checkpoint，實際停止筆數可能更高。','', 'RSS watchdog 計算整個程序的常駐頁；cgroup watchdog 包含其餘程序、page cache 等，也可能先於 RSS watchdog 觸發。故未完成者只能說在本次保護預算下未完成，不能推論其完整插入所需峰值，也不能當作 8 GiB 硬限制的精確容量上限。','', '```sh',f'python3 tools/run_insert_stream.py --entries {n} --limit-gib 0 --rss-limit-gib 7 --cgroup-limit-gib 7.5 --out {d.name}',f'python3 tools/summarize_insert_rss.py {d.name}','```','', '完整設定、dependency/source/binary SHA、原始 checkpoint、exit status、停止原因、監控最大值與前後 cgroup memory.events 均保留。與前次 500M 的 RLIMIT_AS 診斷不同，本次僅依實際常駐記憶體與整個環境記憶體讀值停止。']
++(d/'REPORT.zh-TW.md').write_text('\n'.join(lines)+'\n')
++print('\n'.join(lines))
+diff --git a/tools/summarize_insert_stream.py b/tools/summarize_insert_stream.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ab3d00bd7fbe5702dbc99dfd7ffbcd57e872225
+--- /dev/null
++++ b/tools/summarize_insert_stream.py
+@@ -0,0 +1,23 @@
++#!/usr/bin/env python3
++"""Summarize completed and failed streaming insert probes without extrapolation."""
++import argparse,csv,json
++from pathlib import Path
++p=argparse.ArgumentParser();p.add_argument('directory',type=Path);a=p.parse_args();d=a.directory
++manifest=json.loads((d/'environment.json').read_text()); results=json.loads((d/'results.json').read_text())
++n=manifest['entries']; cap=manifest['limit_address_space_bytes']/2**30
++names=['sflat','Boost flat','Ankerl dense','Abseil flat','Google dense','Google sparse'];rows=[]
++for name,r in zip(names,results):
++    last=r['last']; complete=r['returncode']==0 and last and last['status']=='completed' and int(last['inserted'])==n
++    if last:
++        baseline=int(last['baseline_bytes']);rss=(int(last['rss_bytes'])-baseline)/2**30;peak=max(0,int(last['peak_bytes'])-baseline)/2**30
++    else:rss=peak=None
++    rows.append(dict(map=name,target_entries=n,completed=complete,returncode=r['returncode'],last_status=last['status'] if last else 'no_record',last_confirmed_entries=int(last['inserted']) if last else 0,rss_delta_gib=rss,peak_delta_gib=peak))
++with (d/'summary.csv').open('w') as f:
++    w=csv.DictWriter(f,fieldnames=rows[0]);w.writeheader();w.writerows(rows)
++lines=['# 500M 不 reserve、單純 insert：受限環境診斷','',f'目標 {n:,} entries，uint64_t → uint64_t。六者均從空表 native insert，不 reserve、不 find；以雙射即時生成唯一 key，排除 Google markers，沒有 O(N) 輸入陣列。每者一個獨立程序、相同 CPU affinity、共用 std::hash 與先前版本/編譯設定。elapsed 包含 key generation 與每 10M checkpoint 開銷。','',f'環境實體記憶體上限 8 GiB、無 swap；本次設 RLIMIT_AS={cap:g} GiB，以免耗盡環境。這是虛擬位址空間上限，並非 RSS 限制。未 touch 的 mmap 與擴容時的新舊配置都計入，因此以下失敗筆數不能當作 8 GiB RAM 的真實容量上限。','',f'完成 {n:,} entries：{sum(r["completed"] for r in rows)}/{len(rows)}。未完成者沒有 500M 實測用量，以下沒有外推或當作同筆數排名。','', '| Map | 狀態 | 最後確認插入數 | 該時 RSS 增量 GiB | 該時累計 peak 增量 GiB |','|---|---|---:|---:|---:|']
++for r in rows:
++    status='完成' if r['completed'] else ('配置失敗' if r['last_status']=='allocation_failed' else f'程序終止，rc={r["returncode"]}；僅有 checkpoint')
++    lines.append(f'| {r["map"]} | {status} | {r["last_confirmed_entries"]:,} | {r["rss_delta_gib"]:.3f} | {r["peak_delta_gib"]:.3f} |')
++lines+=['','RSS 與 peak 均扣除建表前程序 baseline；兩者來自不同 kernel accounting，可能略有差異。配置失敗列在 catch 中、map 尚未析構時讀取。訊號終止列只有最後 checkpoint，筆數與峰值都是可確認的下界，並非終止瞬間的峰值。失敗後 RSS 也不是一個保證可正常使用的 map 之用量。','', 'Google sparse 的 stderr 明確回報 failed to reallocate，並以 exit 1 結束；Google dense 以 SIGSEGV 結束。這兩列僅保留最後 checkpoint。系統 cgroup OOM / OOM kill 計數皆為 0。','', '500M 筆 16-byte key/value 的有效資料本身為 7.451 GiB，還需空槽、索引、配置與成長空間。本環境無法提供完整 500M 六者的實測比較。建議在 32 GiB 或更大的機器重跑，保留足夠作業系統餘裕：','', '```sh','python3 tools/run_insert_stream.py --entries 500000000 --limit-gib 0','python3 tools/summarize_insert_stream.py results-flat64-500m','```','', '工具產生獨立 build-flat64-stream executables，沒有覆寫先前 1M/10M/100M 的 benchmark binaries。原始逐 10M checkpoint、stderr、exit status、binary hashes、dependency commits 與環境設定均一併保留。']
++(d/'REPORT.zh-TW.md').write_text('\n'.join(lines)+'\n')
++print('\n'.join(lines))
+diff --git a/tools/summarize_insert_vm_rss.py b/tools/summarize_insert_vm_rss.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..77e6e1df6db8ffe66b73899c8f699f55d9ebc48d
+--- /dev/null
++++ b/tools/summarize_insert_vm_rss.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python3
++"""Summarize live-map virtual space and RSS, separating completed and stopped runs."""
++import argparse,csv,json
++from pathlib import Path
++p=argparse.ArgumentParser();p.add_argument('directory',type=Path);a=p.parse_args();d=a.directory
++m=json.loads((d/'environment.json').read_text());rs=json.loads((d/'results.json').read_text())
++assert m['limit_address_space_bytes']==0 and m['inherited_rlimit_as']==[-1,-1]
++n=m['entries'];names=dict(zip(['sflat_flat_hash_map','boost_unordered_flat_map','ankerl_unordered_dense','abseil_flat_hash_map','google_dense_hash_map','google_sparse_hash_map'],['sflat','Boost flat','Ankerl dense','Abseil flat','Google dense','Google sparse']))
++assert len(rs)==6
++rows=[]
++for r in rs:
++ last=r['last'];done=bool(r['returncode']==0 and last and last['status']=='completed' and int(last['inserted'])==n)
++ snap=last if done else r['stop_snapshot']
++ assert snap is not None
++ rss_peak=max(int(last['peak_bytes']) if last else 0,r['observed_hwm_max_bytes'])
++ vm_peak=max(int(snap['vmpeak_bytes']),r['observed_vmpeak_max_bytes'])
++ rows.append(dict(map=names[r['map']],completed=done,target_entries=n,last_confirmed_entries=int(last['inserted']) if last else 0,measurement='after_target_insert' if done else 'at_watchdog_stop',vmsize_gib=int(snap['vmsize_bytes'])/2**30,rss_gib=int(snap['rss_bytes'])/2**30,vmpeak_gib=vm_peak/2**30,rss_peak_gib=rss_peak/2**30,peak_is_lower_bound=not done,stop_reason=r['stop_reason'],returncode=r['returncode']))
++with (d/'summary.csv').open('w') as f:
++ w=csv.DictWriter(f,fieldnames=rows[0]);w.writeheader();w.writerows(rows)
++lines=[f'# {n/1e6:g}M 不 reserve insert：VmSize 與 RSS','',f'uint64_t → uint64_t；唯一 key 即時生成，不配置輸入陣列；不 reserve、不 find。六種 map 共用 std::hash、相同輸入順序、CPU affinity、原有版本與編譯設定；每種一個獨立程序。目標 {n:,} entries，完成 {sum(x["completed"] for x in rows)}/6。','', '**本表為整個程序用量，沒有扣除 baseline**（baseline 仍保存於原始 CSV）。VmSize 是當下整個虛擬位址空間，包含預留、尚未 resident 的映射；RSS 是當下常駐頁。VmPeak 是程序歷來最大 VmSize，RSS peak 是 getrusage 與已監控 VmHWM 的最大值，兩個峰值不一定發生於同一時刻。單位 GiB = 2^30 bytes。','', '## 完成目標：最後一筆 insert 後、map 仍存活','', '| Map | Entries | VmSize GiB | RSS GiB | VmPeak GiB | RSS peak GiB |','|---|---:|---:|---:|---:|---:|']
++for x in rows:
++ if x['completed']:lines.append(f'| {x["map"]} | {n:,} | {x["vmsize_gib"]:.3f} | {x["rss_gib"]:.3f} | {x["vmpeak_gib"]:.3f} | {x["rss_peak_gib"]:.3f} |')
++lines+=['','## 未完成目標：監控發出 SIGKILL 前的同一個取樣','', '| Map | 最後確認筆數下界 | 停止時 VmSize GiB | 停止時 RSS GiB | 已觀測 VmPeak GiB | 已觀測 RSS peak GiB |','|---|---:|---:|---:|---:|---:|']
++for x in rows:
++ if not x['completed']:lines.append(f'| {x["map"]} | ≥{x["last_confirmed_entries"]:,} | {x["vmsize_gib"]:.3f} | {x["rss_gib"]:.3f} | ≥{x["vmpeak_gib"]:.3f} | ≥{x["rss_peak_gib"]:.3f} |')
++lines+=['', f'未完成者以上用量是停止取樣，不能當成 {n/1e6:g}M 的用量，也不能當成完成 {n/1e6:g}M 所需峰值；最後確認筆數來自每 10M checkpoint，停止當時實際筆數可能更高。取樣與 SIGKILL 之間仍可能有少量配置，因此未完成者 peak 是下界。','',f'RLIMIT_AS soft/hard 均為 unlimited，沒有設定虛擬位址限制。每約 {m["watchdog_poll_seconds"]*1000:g} ms 監控實際 RSS；程序 RSS 預算 {m["rss_limit_bytes"]/2**30:g} GiB、整個環境 memory.current 保護線 {m["cgroup_watchdog_bytes"]/2**30:g} GiB，環境硬上限 8 GiB，無 swap。總用量包含其他程序與 page cache，可能先觸發總用量保護。這是取樣監控，並非 Linux RLIMIT_RSS 硬限制。','', '完成者的 VmSize/VmPeak 從程序內 /proc/self/status 讀取，RSS 從 smaps_rollup 讀取；未完成者的 VmSize/RSS 同取自外部監控的 /proc/PID/status。兩種 RSS kernel accounting 可能有少量差異。','', '```sh',f'python3 tools/run_insert_stream.py --entries {n} --limit-gib 0 --rss-limit-gib 7 --cgroup-limit-gib 7.5 --out {d.name}',f'python3 tools/summarize_insert_vm_rss.py {d.name}','```','', '原始 CSV、停止時快照、觀測峰值、metadata、source/dependency/binary SHA、測量用 C++ source snapshot、前後 OOM event counters 均保留。這是單次記憶體測試；elapsed 包含即時 key 產生、checkpoint 與監控成本，不應直接與先前純 insert timing 排名混用。']
++(d/'REPORT.zh-TW.md').write_text('\n'.join(lines)+'\n');print('\n'.join(lines))
