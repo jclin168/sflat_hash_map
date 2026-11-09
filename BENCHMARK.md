@@ -671,6 +671,29 @@ differences are in the noise). Octave churn and ie (`bench/octave.cpp`,
 | churn 500K | 142.0 | 144.7 | **124.9** | 179.9 | 188.3 | 185.1 |
 | ie 500K | 118.7 | 120.4 | **109.6** | 137.2 | 157.0 | 161.5 |
 
+### Ankerl's map_benchmark (d77af38)
+
+[jclin168/map_benchmark](https://github.com/jclin168/map_benchmark), branch
+ccr-87fd9ee6-aocb8p, file SFLAT_RESULTS.md, has all 15 benchmarks of
+Ankerl's map_benchmark on this machine, with `std::hash` and
+`ankerl::unordered_dense::hash`. Geometric mean of (time / best time) and
+(peak memory / lowest peak memory), lower is better:
+
+| Map | std::hash time | std::hash mem | ankerl hash time | ankerl hash mem |
+|---|---|---|---|---|
+| absl::flat_hash_map | 9.02 | 1.25 | 1.99 | 1.29 |
+| ankerl::unordered_dense::map | 1.68 | 1.63 | 1.23 | 1.10 |
+| boost::unordered_flat_map 1_83 | 2.30 | 1.80 | 1.69 | 1.22 |
+| emhash8::HashMap | 2.38 | 1.14 | 1.49 | 1.19 |
+| sflat::flat_hash_map | 2.01 | 1.58 | 1.61 | 1.07 |
+| sflat::flat_hash_map 4d705e4 | 2.12 | 1.56 | 1.64 | 1.06 |
+
+- With the ankerl hash: udm 1.23, emhash8 1.49, sflat 1.61, boost 1.69,
+  absl 1.99. sflat uses the least memory.
+- sflat is the fastest in AccidentallyQuadratic and InsertHugeInt. It is
+  slow in IterateIntegers and Copy, where udm and emhash8 use a dense
+  array of the elements.
+
 ## Intel Celeron N5105
 
 ### Test environment
