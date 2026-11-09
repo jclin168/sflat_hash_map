@@ -1531,6 +1531,11 @@ class flat_hash_map {
   template <typename Construct>
   SFLAT_NOINLINE std::pair<iterator, bool> insert_with_slow(
       const key_type& key, uint64_t h, Construct&& construct) {
+    // Erase does not check the tombstone limit (see mark_erased_cur()), so
+    // this path does: at the limit the table is rebuilt. Only clear
+    // growth_left_ here, never set it: with growth_left_ == 0, insert_with()
+    // did not look for the key in the home group.
+    if (growth_left_ != 0 && deleted_ >= tombstone_limit()) growth_left_ = 0;
     if (growth_left_ != 0) {
       // No migration, and at least one empty slot, so the loop below ends.
       // insert_with() found that the home group neither holds the key nor
@@ -2166,24 +2171,40 @@ class flat_hash_map {
   // keeps erase + insert at a fixed size from filling the table with
   // tombstones. The old table of a migration always gets a tombstone (the
   // migration skips it).
-  void mark_erased(size_t i) noexcept {
+  // Erase marking. The slot gets kEmpty if its group has an empty slot, else
+  // kDeleted (a tombstone), so a group that was full never gets an empty
+  // slot again (find depends on this, see find_ptr()).
+  //
+  // No branches on has_empty or on deleted_: near the load limit has_empty
+  // is close to random, and both values are known only after the find's
+  // memory load. A branch on them that the CPU predicts wrong throws away
+  // the finds of the next erases that already run. Integer arithmetic, not a
+  // ?: of the two control values: gcc 13 made a branch of that. So erase
+  // does not compare deleted_ with the tombstone limit; the insert slow path
+  // does (insert_with_slow()), and that is the only path that tombstones
+  // slow down. growth_left_ gets one more slot only when it is not 0: 0 can
+  // have other reasons, and the slow path recomputes it then.
+  // At 10M entries (Xeon) erase by key took 30 to 39 ns, against 48 to 55
+  // with the tombstone limit test and reset_growth_left() here.
+  //
+  // Slot i (< cap_) of the current table; has_empty is 0 or 1.
+  void mark_erased_cur(size_t i, size_t has_empty) noexcept {
+    static_assert(detail::kEmpty == detail::kDeleted + 1, "control values");
     --size_;
+    ctrl_[i] = static_cast<uint8_t>(detail::kDeleted + has_empty);
+    deleted_ += 1 - has_empty;
+    growth_left_ += has_empty & (0 - static_cast<size_t>(growth_left_ != 0));
+  }
+
+  // Slot i of either table.
+  void mark_erased(size_t i) noexcept {
     if (i >= cap_) {
+      --size_;
       old_ctrl_[i - cap_] = detail::kDeleted;
       return;
     }
-    // No branch on has_empty: near the load limit it is close to random.
-    const bool has_empty =
-        Group::Load(ctrl_ + i / kWidth * kWidth).Match(detail::kEmpty) != 0;
-    ctrl_[i] = has_empty ? detail::kEmpty : detail::kDeleted;
-    deleted_ += has_empty ? 0 : 1;
-    // An emptied slot lets one more insert run on the fast path. growth_left_
-    // == 0 may have another reason, so that case recomputes it.
-    if (SFLAT_LIKELY(growth_left_ != 0 && deleted_ < tombstone_limit())) {
-      growth_left_ += has_empty ? 1 : 0;
-    } else {
-      reset_growth_left();
-    }
+    mark_erased_cur(
+        i, Group::Load(ctrl_ + i / kWidth * kWidth).Match(detail::kEmpty) != 0);
   }
 
   // --------------------------------------------------------------- modifiers
@@ -2353,7 +2374,25 @@ class flat_hash_map {
   // reads memory the caller never uses: on Apple M2 erase by key got 17
   // percent faster at 10M entries and 18 percent at 100M.
   size_type erase(const key_type& key) {
-    value_type* const e = find_ptr(key, hash_mixed(key));
+    const uint64_t h = hash_mixed(key);
+    // A key in its home group (most keys): mark it with the home group that
+    // the probe loaded, not a second load of the group after the find.
+    if (SFLAT_LIKELY(old_cap_ == 0)) {
+      const size_t base = detail::HomeSlot(h, cap_);
+      const Group g = Group::Load(ctrl_ + base);
+      Mask m = g.MatchH2(h);
+      while (m) {
+        const size_t i = base + Group::Lane(m);
+        value_type* const e = cur_slot(i);
+        if (equal_(e->first, key)) {
+          e->~value_type();
+          mark_erased_cur(i, g.Match(detail::kEmpty) != 0);
+          return 1;
+        }
+        m &= m - 1;
+      }
+    }
+    value_type* const e = find_ptr(key, h);
     if (!e) return 0;
     const size_t i = index_of(e);
     destroy_slot(i);

@@ -51,6 +51,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -58,6 +59,7 @@
 
 #include <algorithm>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace {
@@ -374,8 +376,19 @@ int main(int argc, char** argv) {
     sizes = {1000000, 5000000};
   }
 
+  // ONLY=sflat,boost_flat runs only these maps (comma-separated names).
+  std::vector<Entry> maps;
+  const char* only = std::getenv("ONLY");
+  for (const Entry& e : kMaps) {
+    if (only && *only) {
+      const std::string list = std::string(",") + only + ",";
+      if (list.find(std::string(",") + e.name + ",") == std::string::npos)
+        continue;
+    }
+    maps.push_back(e);
+  }
   std::printf("# maps:");
-  for (const Entry& e : kMaps) std::printf(" %s", e.name);
+  for (const Entry& e : maps) std::printf(" %s", e.name);
 #if defined(SFLAT_SIMD_AVX2)
   const char* simd = "AVX2";
 #elif defined(SFLAT_SIMD_SSE2)
@@ -395,16 +408,16 @@ int main(int argc, char** argv) {
     const long rss_base = run_child(child_baseline, n);
     std::vector<long> rss_a, rss_b;
     // Scenario A (reserved); peak RSS ~= map memory.
-    for (const Entry& e : kMaps) rss_a.push_back(run_child(e.a, n));
+    for (const Entry& e : maps) rss_a.push_back(run_child(e.a, n));
     // Scenario B (no reserve). Peak RSS here includes the transient peak
     // of growth (old table + new table alive at the same time).
-    for (const Entry& e : kMaps) rss_b.push_back(run_child(e.b, n));
+    for (const Entry& e : maps) rss_b.push_back(run_child(e.b, n));
     std::printf("  bytes/entry (steady):");
     for (size_t i = 0; i < rss_a.size(); ++i)
-      std::printf(" %s=%.1f", kMaps[i].name, (rss_a[i] - rss_base) * 1024.0 / n);
+      std::printf(" %s=%.1f", maps[i].name, (rss_a[i] - rss_base) * 1024.0 / n);
     std::printf("\n  bytes/entry (growth peak):");
     for (size_t i = 0; i < rss_b.size(); ++i)
-      std::printf(" %s=%.1f", kMaps[i].name, (rss_b[i] - rss_base) * 1024.0 / n);
+      std::printf(" %s=%.1f", maps[i].name, (rss_b[i] - rss_base) * 1024.0 / n);
     std::printf("\n\n");
     std::fflush(stdout);
   }
