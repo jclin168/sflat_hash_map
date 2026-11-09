@@ -466,6 +466,114 @@ void test_safety_net() {
               took.count(), took_c.count());
 }
 
+// Copies of a table take its table slot for slot (clone_table_from): the
+// same capacity, control bytes and tombstones, and each element at its slot.
+struct CopyCounted {
+  static int live, copies, throw_at;
+  uint64_t v;
+  explicit CopyCounted(uint64_t x) : v(x) { ++live; }
+  CopyCounted(const CopyCounted& o) : v(o.v) {
+    if (throw_at >= 0 && copies++ == throw_at) throw std::runtime_error("copy");
+    ++live;
+  }
+  CopyCounted& operator=(const CopyCounted&) = default;
+  ~CopyCounted() { --live; }
+  bool operator==(const CopyCounted& o) const { return v == o.v; }
+  bool operator!=(const CopyCounted& o) const { return v != o.v; }
+};
+int CopyCounted::live = 0, CopyCounted::copies = 0, CopyCounted::throw_at = -1;
+
+void test_copy_table() {
+  // A source within SFLAT_COPY_SLACK of its minimum size (reserved, a few
+  // erased) is copied slot for slot: the same bucket count.
+  const bool clones = SFLAT_COPY_SLACK >= 1.1;
+  {  // trivially copyable elements, with tombstones
+    sflat::flat_hash_map<uint64_t, uint64_t> a;
+    a.reserve(100000);
+    for (uint64_t i = 0; i < 100000; ++i) a[i * 7] = i;
+    for (uint64_t i = 0; i < 100000; i += 50) a.erase(i * 7);
+    sflat::flat_hash_map<uint64_t, uint64_t> b(a);
+    CHECK(b == a && b.size() == a.size());
+    CHECK((b.bucket_count() == a.bucket_count()) == clones);
+    for (uint64_t i = 0; i < 100000; ++i) CHECK((b.find(i * 7) == b.end()) == (i % 50 == 0));
+    b[1] = 1;  // independent of a
+    CHECK(a.find(1) == a.end() && b.size() == a.size() + 1);
+    for (uint64_t i = 100000; i < 200000; ++i) b[i * 7] = i;  // grows from the copy
+    CHECK(b.size() == a.size() + 1 + 100000);
+    sflat::flat_hash_map<uint64_t, uint64_t> c;
+    c = a;
+    CHECK(c == a && (c.bucket_count() == a.bucket_count()) == clones);
+  }
+  {  // non-trivial elements
+    sflat::flat_hash_map<uint64_t, std::string> a;
+    a.reserve(50000);
+    for (uint64_t i = 0; i < 50000; ++i) a[i] = std::string(40, 'a' + i % 26);
+    for (uint64_t i = 0; i < 50000; i += 20) a.erase(i);
+    const sflat::flat_hash_map<uint64_t, std::string> b = a;
+    CHECK(b == a && (b.bucket_count() == a.bucket_count()) == clones);
+  }
+  {  // a table just after a growth (load near 0.44): the copy is smaller
+    sflat::flat_hash_map<uint64_t, uint64_t> a;
+    size_t bc = 0;
+    uint64_t k = 0;
+    for (;; ++k) {
+      a[k] = k;
+      if (k > 5000 && bc && a.bucket_count() != bc) break;
+      bc = a.bucket_count();
+    }
+    for (int i = 0; i < 2000; ++i) {  // past the migration
+      ++k;
+      a[k] = k;
+    }
+    const sflat::flat_hash_map<uint64_t, uint64_t> b(a);
+    CHECK(b == a);
+    if (SFLAT_COPY_SLACK < 2) CHECK(b.bucket_count() < a.bucket_count());
+  }
+  {  // a table with few elements left: the copy shrinks
+    sflat::flat_hash_map<uint64_t, uint64_t> a;
+    for (uint64_t i = 0; i < 100000; ++i) a[i] = i;
+    for (uint64_t i = 100; i < 100000; ++i) a.erase(i);
+    const sflat::flat_hash_map<uint64_t, uint64_t> b(a);
+    CHECK(b == a && b.bucket_count() < a.bucket_count() / 8);
+  }
+  // A copy that throws: no element leaks, the source stays. Slot for slot
+  // (reserved source) and by insert (source with spare slots).
+  for (bool reserved : {true, false}) {
+    using M = sflat::flat_hash_map<uint64_t, CopyCounted>;
+    M a;
+    if (reserved) a.reserve(1000);
+    for (uint64_t i = 0; i < 1000; ++i) a.emplace(i, CopyCounted(i));
+    const int live = CopyCounted::live;
+    for (int at : {0, 1, 500, 999}) {
+      CopyCounted::copies = 0;
+      CopyCounted::throw_at = at;
+      bool threw = false;
+      try {
+        M b(a);
+      } catch (const std::runtime_error&) {
+        threw = true;
+      }
+      CHECK(threw && CopyCounted::live == live && a.size() == 1000);
+    }
+    CopyCounted::throw_at = -1;
+    M b(a);
+    CHECK(b == a && CopyCounted::live == 2 * live);
+  }
+  {  // copying a table that migrates takes the other path
+    sflat::flat_hash_map<uint64_t, uint64_t> a;
+    size_t bc = 0;
+    uint64_t k = 0;
+    for (;; ++k) {
+      a[k] = k;
+      if (k > 5000 && bc && a.bucket_count() != bc) break;  // growth just began
+      bc = a.bucket_count();
+    }
+    const sflat::flat_hash_map<uint64_t, uint64_t> b(a);
+    CHECK(b == a && b.size() == k + 1);
+  }
+  std::printf("test_copy_table OK (%s)\n", clones ? "slot for slot" : "by insert");
+}
+
 // A single-pass iterator over a vector: insert(first, last) cannot count it
 // first, so it must still insert one by one.
 template <typename T>
@@ -978,6 +1086,7 @@ int main() {
   test_hash_bits_structured_keys();
   test_safety_net();
   test_range_insert();
+  test_copy_table();
   test_seed_modes();
   test_during_migration();
   test_self_aliasing();
