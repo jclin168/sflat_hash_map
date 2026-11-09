@@ -1,32 +1,53 @@
-# sflat::flat_hash_map
+# sflat: fast, memory-efficient C++ flat hash map and set
 
-sflat::flat_hash_map is a C++17 header-only hash map for very large tables.
-It uses open addressing with SIMD group probing (AVX2, SSE2, NEON, or a
-portable SWAR fallback). The interface matches the common subset of
-`std::unordered_map`.
+**sflat is a C++17 header-only flat hash map and set for fast insertion and
+lookup in large, memory-bound datasets.** It combines SIMD group probing
+with capacities that are not restricted to powers of two, tiered growth,
+and incremental migration. On Linux with the default allocator, it also
+reclaims migrated pages and requests transparent huge pages (THP), reducing
+resident-memory pressure during growth and TLB misses during large-table
+lookups. `sflat::flat_hash_map` and `sflat::flat_hash_set` provide the common
+interfaces of `std::unordered_map` and `std::unordered_set`.
 
-The map has three goals:
+- **Fast insert and find.** In the [published Xeon 100M-entry benchmark](BENCHMARK.md#intel-xeon),
+  reserved insertion is about **2.2x as fast as Boost flat** and **1.8x as
+  fast as Abseil flat**; insertion without reserve is about **1.6x as fast
+  as Boost flat**. Random-hit lookup is close to both, with a lower memory
+  footprint. These are measured results for that workload, not a promise
+  for every key type or platform; the report includes faster alternatives
+  on other workloads and on Apple M2.
+- **Compact large tables.** The same 100M-entry `uint64_t -> uint64_t`
+  benchmark measures about **19.6 bytes/entry**, versus 21.5 for Boost flat,
+  22.8 for Abseil flat and 43.0 for Google dense. Google sparse uses less
+  memory, with slower insert and lookup in those measurements.
+- **Controlled growth.** Capacity is rounded to a SIMD group, rather than
+  a power of two. Growth factors decrease from 2x to 1.5x to 1.25x as the
+  table gets larger. Linux page reclamation reduces the resident cost of
+  keeping old and new tables during migration; virtual address reservations
+  can still be larger than RSS.
+- **Portable probing.** AVX2, SSE2 and little-endian ARM NEON back ends,
+  plus a portable SWAR fallback. Selection is at compile time.
+- **Easy integration and tuning.** Header-only, Apache-2.0 licensed, with
+  custom hash/equality/allocator parameters and macros for huge pages,
+  growth, SIMD and lookup tuning.
 
-- **Fast insert and find.** SIMD compares a group of 16 or 32 control
-  bytes at once, and the hot paths are small and inlined.
-- **Memory in proportion to the entries.** The capacity is not a power of
-  two, and the growth factor gets smaller as the table gets large (2x, 1.5x,
-  1.25x).
-- **Low memory pressure on Linux.** Growth is incremental and gives old
-  pages back to the kernel with `madvise`. Large tables use transparent huge
-  pages (THP).
+[Quick start](#quick-start) · [Usage patterns](#usage-patterns) ·
+[Platforms and SIMD](#platforms-and-simd) ·
+[Workload tuning](#tuning-for-your-workload) ·
+[Macro reference](#configuration-macros) · [Benchmarks](BENCHMARK.md)
 
-## Why this project
+## When to use sflat
 
-- `std::unordered_map` is too slow.
-- Other flat hash maps use too much memory. They grow 2x, so a large table
-  goes from 32 GB to 64 GB to 128 GB or more. This is not acceptable.
-- The usual use case is simple: you know the number of entries, you fill
-  the map, and then you do fast lookups. Iteration is almost never
-  necessary. Lookups of missing keys are rare.
-- Transparent huge pages (THP) can make lookups in large tables faster.
+Use sflat for large integer or string dictionaries, counters, membership
+sets, and tables built once and queried many times. If you know the size,
+`reserve(n)` avoids automatic growth during insertion. If the size is
+unknown, incremental migration spreads the rehash work across inserts.
 
-These requirements are the reasons for this project.
+The default Linux memory path is especially useful when tables exceed the
+last-level cache or when rehash peaks matter. Latency-sensitive services
+can disable THP hints while keeping mmap and page reclamation. For
+iteration-heavy workloads, stable element addresses, or a different key
+mix, compare the alternatives and review [API compatibility](#api-compatibility).
 
 ## Key advantages
 
@@ -134,44 +155,233 @@ ns/op, lower is better; see [BENCHMARK.md](BENCHMARK.md)):
 
 ## Quick start
 
+Add `include/` to your compiler's include path; there is no library to link.
+Use GCC or Clang with C++17 and support for `__uint128_t` (used by the hash
+mixer). SIMD selection alone does not establish support for another
+compiler; native MSVC is not currently a supported build path.
+
 ```cpp
 #include <sflat/flat_hash_map.hpp>
+#include <sflat/flat_hash_set.hpp>
+#include <cassert>
+#include <cstdint>
 
-sflat::flat_hash_map<uint64_t, uint64_t> m;
-m.reserve(1000000);
-m.emplace(42, 100);
-auto it = m.find(42);  // it->second == 100
+int main() {
+    sflat::flat_hash_map<std::uint64_t, std::uint64_t> values;
+    values.reserve(1000000);
+    values.emplace(42, 100);
+    auto it = values.find(42);
+    assert(it != values.end() && it->second == 100);
+
+    sflat::flat_hash_set<std::uint64_t> seen;
+    seen.insert(42);
+    assert(seen.contains(42));
+}
 ```
 
-For keys without values, `sflat::flat_hash_set` uses the same table and
-the same tuning, with an `std::unordered_set` interface. Each slot holds
-only the key, so a set of `uint64_t` needs about 10.6 bytes per entry
-instead of the map's 19.7:
+```sh
+g++ -std=c++17 -O3 -I include example.cpp -o example
+```
+
+For CMake, add the repository as a subdirectory and link the header-only
+`sflat` interface target. Set `SFLAT_BUILD_TESTS=OFF` and
+`SFLAT_BUILD_BENCH=OFF` when you only need the library. The current CMake
+project adds `-march=native` when supported unless `CMAKE_CXX_FLAGS`
+already contains a `-march=` setting; choose an explicit target when
+building binaries for other machines.
+
+## Usage patterns
+
+### Known-size dictionary: reserve, then fill and find
+
+Set the load factor before reserving if you change it. The default is
+0.875; a lower value uses more memory and may shorten probes. Measure the
+trade-off on your keys rather than assuming a lower value is faster.
 
 ```cpp
-#include <sflat/flat_hash_set.hpp>
+#include <sflat/flat_hash_map.hpp>
+#include <cassert>
+#include <cstdint>
+#include <string>
 
-sflat::flat_hash_set<uint64_t> s;
-s.reserve(1000000);
-s.insert(42);
-bool has = s.contains(42);  // true
+int main() {
+    sflat::flat_hash_map<std::uint64_t, std::string> users;
+    users.reserve(1000000);
+    users.try_emplace(42, "Alice");
+    users.insert_or_assign(42, "Alice Chen");
+    const auto& read_only = users;
+    auto it = read_only.find(42);
+    assert(it != read_only.end() && it->second == "Alice Chen");
+}
 ```
 
-Set elements cannot be changed in place (iterators give `const Key&`), and
-the map-only calls (`operator[]`, `at`, `try_emplace`, `insert_or_assign`)
-do not exist. The set offers only the `std::unordered_set` interface (no
-`find_batch()`).
+### Unknown-size stream: insert, then prepare for read-only queries
 
-Compile with this command:
+```cpp
+#include <sflat/flat_hash_map.hpp>
+#include <cassert>
+#include <cstdint>
 
-`g++ -std=c++17 -O3 -march=native -I include your_file.cpp`
+int main() {
+    sflat::flat_hash_map<std::uint64_t, std::uint64_t> counts;
+    for (auto key : {42ULL, 7ULL, 42ULL}) ++counts[key];
+    counts.finish_migration(); // Finish any pending growth before read-only use.
+    assert(counts.at(42) == 2);
+}
+```
 
-`-march=native` enables AVX2 on CPUs that have it. Without AVX2 the map
-uses SSE2, which every x86-64 CPU has. On ARM (for example Apple Silicon)
-NEON is part of the base AArch64 ISA, so no flag is needed. `-mcpu=native`
-is fine too:
+`finish_migration()` can move work into the build/query boundary; it does
+not shrink the table. Use `optimize()` when you also want to remove
+tombstones and shrink excess capacity after updates. Both can take linear
+work and invalidate element addresses. Benchmark the resulting lookup
+speed: shrinking saves memory but can increase the load factor. Const
+lookups do not advance migration; concurrent readers require no concurrent
+writer and appropriate synchronization when publishing the table.
 
-`clang++ -std=c++17 -O3 -mcpu=native -I include your_file.cpp`
+### String-key counters and key-only sets
+
+```cpp
+#include <sflat/flat_hash_map.hpp>
+#include <sflat/flat_hash_set.hpp>
+#include <cassert>
+#include <cstdint>
+#include <string>
+
+int main() {
+    sflat::flat_hash_map<std::string, std::uint64_t> frequency;
+    for (const auto* word : {"red", "blue", "red"}) ++frequency[word];
+    frequency.erase("blue");
+    assert(frequency.at("red") == 2);
+
+    sflat::flat_hash_set<std::string> seen;
+    seen.reserve(1000);
+    const bool first = seen.insert("red").second;
+    const bool duplicate = seen.insert("red").second;
+    assert(first && !duplicate && seen.contains("red"));
+}
+```
+
+A set stores only keys. Its iterators expose immutable keys; it has no
+`operator[]`, `try_emplace`, `insert_or_assign`, or map `find_batch()`.
+For a map, `find()` checks membership without inserting; `operator[]`
+inserts a default value when the key is absent.
+
+### Custom key and hash
+
+```cpp
+#include <sflat/flat_hash_map.hpp>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+
+struct UserId {
+    std::uint64_t value;
+    bool operator==(const UserId& other) const { return value == other.value; }
+};
+struct UserIdHash {
+    std::size_t operator()(const UserId& id) const noexcept {
+        return std::hash<std::uint64_t>{}(id.value);
+    }
+};
+int main() {
+    sflat::flat_hash_map<UserId, int, UserIdHash> scores;
+    scores.emplace(UserId{42}, 100);
+    assert(scores.at(UserId{42}) == 100);
+}
+```
+
+The template parameters are `Key, T, Hash, KeyEqual, Allocator` for the
+map and `Key, Hash, KeyEqual, Allocator` for the set. Equal keys must hash
+equally. The table mixes the supplied hash internally; this is not a
+cryptographic hash. A custom allocator uses its own allocation path and
+disables sflat's default mmap, THP and page-reclamation path.
+
+## Platforms and SIMD
+
+| Target | Probe back end | Group width | Typical GCC/Clang build |
+|---|---|---:|---|
+| Intel/AMD x86-64 with AVX2 | AVX2 | 32 slots | `-mavx2` or `-march=native` on an AVX2 machine |
+| Baseline x86-64 | SSE2 | 16 slots | Default x86-64 target, or `-DSFLAT_NO_AVX2=1` in an AVX2 build |
+| Little-endian AArch64, including Apple Silicon | NEON | 16 slots | Native ARM64 compiler target; no x86 SIMD flags |
+| ARMv7 with NEON enabled | NEON selection | 16 slots | Requires a compatible compiler/target; the published ARM tests cover Apple M2, not ARMv7 |
+| SIMD disabled or no matching SIMD target | SWAR | 8 slots | `-DSFLAT_NO_SIMD=1`; compiler requirements still apply |
+
+The ARMv7 detection path still requires compiler support for the mixer's
+128-bit arithmetic, which is not available on every 32-bit ARM toolchain.
+
+There is no runtime CPU dispatch. An AVX2 binary needs an AVX2-capable CPU;
+`SFLAT_NO_AVX2=1` changes the table's probing back end but does not remove
+AVX2 instructions that the compiler emits elsewhere. For a portable
+x86-64 binary, compile for the baseline target rather than using
+`-march=native`. For a local Apple Silicon build, Clang's `-mcpu=native`
+can tune for that machine; use an explicit target for distribution.
+
+The published correctness/benchmark coverage is Linux x86-64
+(GCC/Clang, AVX2/SSE2/SWAR) and macOS Apple Silicon (Clang, NEON/SWAR);
+see [Correctness tests](#correctness-tests) for the recorded runs.
+Linux defaults to mmap, page reclamation and THP hints. macOS and other
+non-Linux targets default to `operator new`, without that Linux memory
+path. SIMD and incremental migration still apply.
+
+## Tuning for your workload
+
+Start with the defaults. Define macros **before the first sflat header**
+or pass them as compiler definitions, and use consistent settings in all
+translation units of a program. The map and set share these settings;
+they are not per-container runtime options. Do not change them halfway
+through a source file or mix differently configured headers across objects.
+
+| Application | Starting point | Trade-off to measure |
+|---|---|---|
+| Known-size, build-once dictionary | `reserve(n)`, default load factor and Linux THP | Avoids automatic growth; initial page faults remain part of insertion |
+| Large read-heavy Linux table | Default `SFLAT_USE_MMAP=1`, `SFLAT_USE_THP=1` | THP can reduce TLB misses; kernel policy and memory availability control actual huge-page use |
+| Latency-sensitive service | `SFLAT_USE_THP=0` | Keeps mmap and page reclamation; may reduce huge-page fault/collapse costs but lose throughput |
+| Memory-constrained growing table | Try `SFLAT_GROW_2X_BELOW=(256ULL<<20)`, `SFLAT_GROW_1_5X_BELOW=(1ULL<<30)` | Uses 1.25x growth from 1 GiB; more frequent migrations can reduce insert throughput |
+| Predictable small-table growth work | Try `SFLAT_GROW_AT_ONCE_BELOW=0` | Makes growth incremental, but queries may see both tables until inserts or `finish_migration()` finish it |
+| Application-managed allocation | Custom allocator, or `SFLAT_USE_MMAP=0` | Uses the allocator/operator-new path; loses sflat's page reclamation and THP hints |
+| Reproducible experiments | `SFLAT_PROCESS_SEED=1` | Repeats the seed sequence; tables still get different seeds; execution order and build also matter |
+| SIMD comparison or fallback | `SFLAT_NO_AVX2=1` or `SFLAT_NO_SIMD=1` | Changes group width and memory/probe behavior; benchmark on the deployment target |
+| NEON or unusual hit/miss mix | Compare `SFLAT_PREFETCH_SLOTS`, `SFLAT_LAZY_OVERFLOW`, `SFLAT_FIND_NEXT_INLINE` | Defaults are platform-specific; larger inlined paths and prefetches can hurt other workloads |
+| Frequent erase/insert churn | Try `SFLAT_TOMBSTONE_DIV=64` versus the default 32 | Starts in-place cleanup at fewer tombstones; extra cleanup work may outweigh shorter probes |
+| Miss-heavy queries or tight metadata budget | Compare `SFLAT_OVERFLOW_BITS=8`, `16`, `32`, `64` | Wider overflow filters use more metadata and can reject more false-positive probes |
+| Frequent copies under a memory budget | Try `SFLAT_COPY_SLACK=0` | Copies into minimum capacity, with more hashing/insertion work |
+
+For example, keep Linux page reclamation while disabling THP hints:
+
+```cpp
+#define SFLAT_USE_THP 0
+#include <sflat/flat_hash_map.hpp>
+#include <sflat/flat_hash_set.hpp>
+
+int main() {
+    sflat::flat_hash_map<int, int> values;
+    values.emplace(1, 2);
+}
+```
+
+Or build a separate configuration with smaller growth steps:
+
+```sh
+g++ -std=c++17 -O3 -I include \
+  -DSFLAT_GROW_2X_BELOW=268435456ULL -DSFLAT_GROW_1_5X_BELOW=1073741824ULL \
+  your_file.cpp -o your_program
+```
+
+This is an application-specific experiment, not a claim that smaller
+steps preserve insertion speed. Growth thresholds count the current slot
+and control-byte capacity in **bytes**, not the number of entries; leave
+`SFLAT_GROW_2X_BELOW <= SFLAT_GROW_1_5X_BELOW`.
+
+THP uses `MADV_HUGEPAGE` hints, not an explicit hugetlb pool. It needs the
+system policy `madvise` or `always`; allocation of 2 MiB pages is not
+guaranteed. `SFLAT_USE_THP=0` keeps mmap and `MADV_DONTNEED` page release;
+`SFLAT_USE_MMAP=0` disables both that page release and THP. During migration,
+unresident old/new mappings can still consume virtual address space, so
+size an address-space limit separately from an RSS budget.
+
+See the [complete macro reference](#configuration-macros) for overflow
+filter size, tombstone rebuilding, copy slack and seed controls.
 
 ## File structure
 
@@ -503,11 +713,13 @@ map then uses only the allocator.
 
 ### Configuration macros
 
-Define these before the include.
+Define these before the first sflat include, or with compiler `-D` options.
+Keep the same definitions across translation units; see
+[Tuning for your workload](#tuning-for-your-workload) for profiles and examples.
 
 | Macro | Default | Effect |
 |-------|---------|--------|
-| `SFLAT_USE_MMAP` | 1 on Linux | 0: use `operator new` for all arrays. No page release, no THP. |
+| `SFLAT_USE_MMAP` | 1 on Linux, 0 elsewhere | 0: use `operator new` for all arrays. No page release, no THP. |
 | `SFLAT_USE_THP` | 1 | 0: keep `mmap` and page release, but give no huge page hints. |
 | `SFLAT_GROW_2X_BELOW` | 2 GiB | Tables smaller than this many bytes grow 2x. |
 | `SFLAT_GROW_1_5X_BELOW` | 10 GiB | Tables smaller than this grow 1.5x; larger tables grow 1.25x. |
@@ -550,8 +762,9 @@ Limits (common trade-offs of open addressing):
 
 - Iterators are not node-based. An insert can move elements (a rehash, or
   a migration step), and then iterators and pointers become invalid.
-  `std::unordered_map` guarantees that `insert` does not invalidate
-  iterators. This map does not give that guarantee.
+  `std::unordered_map` preserves element references and pointers across a
+  rehash, but invalidates iterators when rehashing. sflat can invalidate
+  references, pointers and iterators during insertion or migration.
 - `erase` never moves other items. `it = m.erase(it)` loops are safe, also
   during a migration. Tombstones are removed in place during later inserts.
   When no more inserts will occur, `optimize()` removes them and shrinks the
