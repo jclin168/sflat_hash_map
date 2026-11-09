@@ -36,6 +36,15 @@ if(SFLAT_BUILD_TESTS)
   add_executable(set_interface tests/set_interface.cpp)
   target_link_libraries(set_interface PRIVATE sflat)
   target_compile_options(set_interface PRIVATE -O2 -Wall)
+  # Small tables grow at once by default; these keep the small tables of the
+  # tests on the incremental path, so a migration is still covered.
+  foreach(t correctness set_correctness)
+    add_executable(${t}_incremental tests/${t}.cpp)
+    target_link_libraries(${t}_incremental PRIVATE sflat)
+    target_compile_options(${t}_incremental PRIVATE -O2 -Wall)
+    target_compile_definitions(${t}_incremental PRIVATE
+      SFLAT_GROW_AT_ONCE_BELOW=0)
+  endforeach()
 endif()
 
 if(SFLAT_BUILD_BENCH)

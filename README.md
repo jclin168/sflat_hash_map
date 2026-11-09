@@ -431,14 +431,19 @@ A rehash, a migration or an in-place tombstone removal rebuilds the bits.
   `uint64_t -> uint64_t` (17 bytes per slot), 2 GiB is about 126M slots
   (110M entries) and 10 GiB is about 630M slots (550M entries). Set the
   limits in bytes with `SFLAT_GROW_2X_BELOW` and `SFLAT_GROW_1_5X_BELOW`.
-- **Incremental growth.** The map does not move all items at once. Each
-  insert during a migration moves the next 64 old slots (2 groups with
-  AVX2) to the new table. This avoids a latency spike: at 10M entries the
+- **Incremental growth.** A table of 2 MiB or more does not move all items
+  at once. Each insert during a migration moves the next 256 old slots (8
+  groups with AVX2) to the new table. This avoids a latency spike: at 10M entries the
   worst insert takes 4 to 50 ms, against 150 to 400 ms for boost_flat and
   emhash8, which rehash in one insert.
 - During a migration, `find` checks the new table first and then the old
   table. `find`, `erase` and iteration never move items. Only inserts move
   the migration forward. `finish_migration()` completes it at once.
+- **Small tables grow at once.** A table below 2 MiB
+  (`SFLAT_GROW_AT_ONCE_BELOW`) moves all items in the insert that starts its
+  growth, about 300 us at most on Apple M2. Otherwise a table where inserts
+  stop just after a growth point stays in the migration, and its lookups
+  stay about 4x to 5x slower until the next inserts (Apple M2).
 
 ### Growth memory (Linux)
 
@@ -507,6 +512,7 @@ Define these before the include.
 | `SFLAT_GROW_2X_BELOW` | 2 GiB | Tables smaller than this many bytes grow 2x. |
 | `SFLAT_GROW_1_5X_BELOW` | 10 GiB | Tables smaller than this grow 1.5x; larger tables grow 1.25x. |
 | `SFLAT_COPY_SLACK` | 1.25 | A copy takes the source's table slot for slot (fast) when the source has at most this many times the slots it needs, else it inserts into a table of the minimum size. 0: always insert (smallest copies); 2: faster copies of tables right after a growth, up to twice the memory. See "Seed". |
+| `SFLAT_GROW_AT_ONCE_BELOW` | 2 MiB | Tables smaller than this move all items when growth starts; 0 keeps all growth incremental. |
 | `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
 | `SFLAT_NO_AVX2` | 0 | 1: use SSE2 groups (16 bytes) in an AVX2 build. |
 | `SFLAT_OVERFLOW_BITS` | 32 | Bits per group in the overflow Bloom filter: 8, 16, 32 or 64. See "Overflow word". |

@@ -13,7 +13,8 @@
 //
 // Workloads (time per operation):
 //   build     insert n keys into an empty map, no reserve; includes the
-//             destructor (per inserted key)
+//             destructor (per inserted key). Each epoch takes the next n
+//             keys of a pool of 2M (see BuildKeys)
 //   reserved  the same after reserve(n)
 //   hit       lookups, all hits (count)
 //   miss      lookups, all misses
@@ -145,11 +146,31 @@ void fill(A& a, const Pools& p) {
   for (uint64_t k : p.present) a.insert(k, 1);
 }
 
+// Keys for build and reserved. The same n keys in every epoch would let the
+// branch predictor learn the pattern of a map whose hash is fixed in the
+// process (on Apple M2, sflat without seeds built 1500 keys in 2.8 ns per
+// key replayed and 3.7 ns fresh), but not of a map that seeds each table, so
+// each epoch takes the next n keys of a larger pool. Each map has its own
+// position, so all maps see the same keys.
+struct BuildKeys {
+  static constexpr size_t kPool = size_t{1} << 21;
+  std::vector<uint64_t> keys;
+  std::vector<size_t> at;
+  BuildKeys(size_t n, size_t maps)
+      : keys(make_keys(0, n > kPool ? n : kPool, 4)), at(maps, 0) {}
+  const uint64_t* next(size_t map, size_t n) {
+    if (at[map] + n > keys.size()) at[map] = 0;
+    const uint64_t* p = keys.data() + at[map];
+    at[map] += n;
+    return p;
+  }
+};
+
 template <typename A>
-size_t build(const Pools& p, bool reserve) {
+size_t build(const uint64_t* keys, size_t n, bool reserve) {
   A a;
-  if (reserve) a.reserve(p.present.size());
-  fill(a, p);
+  if (reserve) a.reserve(n);
+  for (size_t i = 0; i < n; ++i) a.insert(keys[i], 1);
   return a.size();
 }
 
@@ -305,18 +326,22 @@ void sweep(size_t base) {
     const size_t lookup_batch = 20000;
 
     if (wanted("build")) {
+      BuildKeys bk(n, K);
       one_point("build", n, n, a_build, [&](auto ic) {
-        return [&] {
+        return [&, map = ic.value] {
           ankerl::nanobench::doNotOptimizeAway(
-              build<std::tuple_element_t<ic.value, Tuple>>(p, false));
+              build<std::tuple_element_t<ic.value, Tuple>>(
+                  bk.next(map, n), n, false));
         };
       });
     }
     if (wanted("reserved")) {
+      BuildKeys bk(n, K);
       one_point("reserved", n, n, a_res, [&](auto ic) {
-        return [&] {
+        return [&, map = ic.value] {
           ankerl::nanobench::doNotOptimizeAway(
-              build<std::tuple_element_t<ic.value, Tuple>>(p, true));
+              build<std::tuple_element_t<ic.value, Tuple>>(
+                  bk.next(map, n), n, true));
         };
       });
     }
