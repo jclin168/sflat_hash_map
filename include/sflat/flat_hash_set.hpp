@@ -1845,9 +1845,15 @@ class flat_hash_set {
   // ------------------------------------------------------------------- data
   // The members of the fast paths first, in bytes [0, 64). The insert fast
   // path reads the mixer, the table and cap_ and writes growth_left_ and
-  // size_: bytes [0, 48), so the members it writes share a cache line with
-  // those it reads. find reads the same table members, the overflow words
-  // and old_cap_ (migrating?), but no growth_left_ or size_.
+  // size_: all in bytes [0, 64), so the members it writes share a cache line
+  // with those it reads. find reads the same table members, the overflow
+  // words and old_cap_ (migrating?), but no growth_left_ or size_.
+  //
+  // growth_left_ and size_ must not be adjacent: Clang then merges the
+  // insert's --growth_left_ and ++size_ into one 16-byte vector load, add and
+  // store, and the next insert's 8-byte load of growth_left_ from that store
+  // is not forwarded. On Apple M2 a reserved insert of 1500 keys took 4.8 ns
+  // instead of 2.5.
   //
   // Measured on the i5-3230M with perf (bench/many_maps.cpp: 131072 maps of
   // 12 keys, scattered, so the map object misses the cache). A find has about
@@ -1862,8 +1868,8 @@ class flat_hash_set {
   slot_type* slots_ = nullptr;
   size_type cap_ = 0;
   size_type growth_left_ = 0;  // see reset_growth_left()
-  size_type size_ = 0;
   detail::Overflow* overflow_ = empty_overflow();  // size cap_/kWidth; per-group overflow Bloom bits
+  size_type size_ = 0;
   size_type old_cap_ = 0;  // != 0 while migrating; see the members below
   size_type deleted_ = 0;  // tombstones in the current table
   size_type limit_ = 0;    // load_limit() of the current table
