@@ -607,19 +607,22 @@ void test_range_insert() {
 
 // Copies take the table slot for slot, as in the map (clone_table_from).
 void test_copy_table() {
+  const bool clones = SFLAT_COPY_SLACK >= 1.1;  // see tests/correctness.cpp
   sflat::flat_hash_set<uint64_t> a;
+  a.reserve(100000);
   for (uint64_t i = 0; i < 100000; ++i) a.insert(i * 7);
-  for (uint64_t i = 0; i < 100000; i += 3) a.erase(i * 7);
+  for (uint64_t i = 0; i < 100000; i += 50) a.erase(i * 7);
   sflat::flat_hash_set<uint64_t> b(a);
-  CHECK(b == a && b.bucket_count() == a.bucket_count());
+  CHECK(b == a && (b.bucket_count() == a.bucket_count()) == clones);
   b.insert(1);
   CHECK(a.count(1) == 0 && b.size() == a.size() + 1);
   sflat::flat_hash_set<std::string> sa;
+  sa.reserve(50000);
   for (uint64_t i = 0; i < 50000; ++i) sa.insert(std::string(30, 'a') + std::to_string(i));
-  for (uint64_t i = 0; i < 50000; i += 4) sa.erase(std::string(30, 'a') + std::to_string(i));
+  for (uint64_t i = 0; i < 50000; i += 20) sa.erase(std::string(30, 'a') + std::to_string(i));
   sflat::flat_hash_set<std::string> sb;
   sb = sa;
-  CHECK(sb == sa && sb.bucket_count() == sa.bucket_count());
+  CHECK(sb == sa && (sb.bucket_count() == sa.bucket_count()) == clones);
   std::printf("test_copy_table OK\n");
 }
 

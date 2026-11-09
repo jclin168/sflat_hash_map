@@ -164,6 +164,13 @@
 #if !defined(SFLAT_GROW_1_5X_BELOW)
 #define SFLAT_GROW_1_5X_BELOW (10ULL << 30)  // 10 GiB
 #endif
+// A copy takes the source's table slot for slot (fast: no hashing, one
+// memcpy for elements that copy as bytes) when the source has at most
+// SFLAT_COPY_SLACK times the slots it needs; else it inserts into a table of
+// the minimum size (as small as possible, but slower). 0: always insert.
+#if !defined(SFLAT_COPY_SLACK)
+#define SFLAT_COPY_SLACK 1.25
+#endif
 #if !defined(SFLAT_USE_MMAP)
 #if defined(__linux__)
 #define SFLAT_USE_MMAP 1
@@ -928,14 +935,25 @@ class flat_hash_map {
     mix_ = other.mix_;  // same order as other, so the writes stay sequential
     // The same table, slot for slot: no hashing or probing, and one memcpy
     // for elements that copy as bytes. Not while other migrates, and not when
-    // other has more than twice the slots it needs, so that a copy of a table
-    // that lost most of its elements still shrinks.
-    if (!other.is_migrating() && other.cap_ <= 2 * min_cap_for(other.size_)) {
+    // other has more than SFLAT_COPY_SLACK times the slots it needs: a table
+    // just after a growth (load 0.44 at 2x) would give a copy twice the size
+    // it needs, so that copy inserts instead (see the README, "Seed").
+    if (!other.is_migrating() &&
+        static_cast<double>(other.cap_) <=
+            SFLAT_COPY_SLACK * static_cast<double>(min_cap_for(other.size_))) {
       clone_table_from(other);
       return;
     }
     rehash_to(min_cap_for(other.size_));
-    for_each_slot(other, [this](const value_type* s) { place_unique(*s); });
+    try {
+      for_each_slot(other, [this](const value_type* s) { place_unique(*s); });
+    } catch (...) {
+      // From a constructor no destructor runs: destroy what was placed (the
+      // control bytes tell which) and free the table.
+      clear();
+      free_storage();
+      throw;
+    }
     size_ = other.size_;
     reset_growth_left();
   }
@@ -1002,8 +1020,14 @@ class flat_hash_map {
     if (other.size_ == 0) return;
     mix_ = other.mix_;
     rehash_to(min_cap_for(other.size_));
-    for_each_slot(other,
-                  [this](value_type* s) { place_unique(std::move(*s)); });
+    try {
+      for_each_slot(other,
+                    [this](value_type* s) { place_unique(std::move(*s)); });
+    } catch (...) {
+      clear();  // as in copy_elements_from()
+      free_storage();
+      throw;
+    }
     size_ = other.size_;
     reset_growth_left();
     other.clear();

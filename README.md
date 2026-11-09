@@ -359,13 +359,17 @@ multipliers of the mixer (`include/sflat/hash_mix.hpp`), which
   `SFLAT_NO_SEED`, without its quadratic cases. See "Configuration macros".
 - The seed stays the same while a table grows, so the growth above still works.
 - It moves with the storage, so move and swap stay O(1) and need no rehash.
-  A copy takes the seed of its source, and with it the same table: the copy
-  constructor and copy assignment copy the control bytes, the overflow words and
-  each element at its slot (one `memcpy` for elements that copy as bytes),
-  with no hashing or probing. map_benchmark's Copy (1M `uint64_t` pairs, 200
-  copies each way): 3.3 s before, 1.4 s now. A source with more than twice the
-  slots it needs, or one that is migrating, is copied by inserting instead,
-  so a copy of a table that lost most of its elements still shrinks.
+  A copy takes the seed of its source. When the source has at most
+  `SFLAT_COPY_SLACK` (1.25) times the slots it needs, the copy also takes its
+  table: the control bytes, the overflow words and each element at its slot
+  (one `memcpy` for elements that copy as bytes), with no hashing or probing.
+  A reserved table of 1M `uint64_t` pairs copies in 3.9 ms instead of 15.0 ms
+  (1M `uint64_t -> std::string`: 17.6 instead of 28.3 ms). Otherwise, or while
+  the source migrates, the copy inserts into a table of the minimum size, so it
+  needs no more memory than before: a table right after a growth (load 0.44 at
+  2x) would give a copy twice the size it needs. Bytes per entry of a copy of a
+  table built without `reserve`: 19.1, 20.1 and 23.2 at 1M, 10M and 100M keys
+  (19.1, 20.1 and 19.7 always inserting; 35.8, 29.0 and 23.2 with a slack of 2).
 - It does not make the map safe against chosen keys: the mixer is not keyed,
   and `std::hash` of an integer or a string has no seed.
 - Seeds of a process start at a random value (`getrandom` on Linux,
@@ -502,6 +506,7 @@ Define these before the include.
 | `SFLAT_USE_THP` | 1 | 0: keep `mmap` and page release, but give no huge page hints. |
 | `SFLAT_GROW_2X_BELOW` | 2 GiB | Tables smaller than this many bytes grow 2x. |
 | `SFLAT_GROW_1_5X_BELOW` | 10 GiB | Tables smaller than this grow 1.5x; larger tables grow 1.25x. |
+| `SFLAT_COPY_SLACK` | 1.25 | A copy takes the source's table slot for slot (fast) when the source has at most this many times the slots it needs, else it inserts into a table of the minimum size. 0: always insert (smallest copies); 2: faster copies of tables right after a growth, up to twice the memory. See "Seed". |
 | `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
 | `SFLAT_NO_AVX2` | 0 | 1: use SSE2 groups (16 bytes) in an AVX2 build. |
 | `SFLAT_OVERFLOW_BITS` | 32 | Bits per group in the overflow Bloom filter: 8, 16, 32 or 64. See "Overflow word". |
