@@ -63,7 +63,7 @@ class flat_hash_set {
               : std::numeric_limits<size_t>::max() / sizeof(slot_type)) /
       kWidth * kWidth;
   // Old slots migrated per insert during growth.
-  static constexpr size_t kMigrateBatch = 64;  // multiple of kWidth
+  static constexpr size_t kMigrateBatch = 256;  // multiple of kWidth
   // Safety net: an insert that probes more slots than this past its home
   // group gives the table a new seed (see reseed()), at the default max load
   // factor; see reseed_probe() for higher ones. Random keys probe at most
@@ -1436,8 +1436,14 @@ class flat_hash_set {
       return;
     }
     if (size_ + 1 > limit_) {
+      const bool at_once =
+          cap_ * (sizeof(slot_type) + 1) < SFLAT_GROW_AT_ONCE_BELOW;
       begin_migration(grown_cap(min_cap_for(size_ + 1)));
-      migrate_step();
+      if (at_once) {
+        finish_migration();
+      } else {
+        migrate_step();
+      }
     } else if (size_ + deleted_ + 1 > used_limit() ||
                deleted_ >= tombstone_limit()) {
       drop_tombstones();  // recycle tombstones without growing
@@ -1678,12 +1684,17 @@ class flat_hash_set {
       old_ctrl_[i - cap_] = detail::kDeleted;
       return;
     }
-    if (Group::Load(ctrl_ + i / kWidth * kWidth).Match(detail::kEmpty)) {
-      ctrl_[i] = detail::kEmpty;
-      reset_growth_left();
+    // No branch on has_empty: near the load limit it is close to random.
+    const bool has_empty =
+        Group::Load(ctrl_ + i / kWidth * kWidth).Match(detail::kEmpty) != 0;
+    ctrl_[i] = has_empty ? detail::kEmpty : detail::kDeleted;
+    deleted_ += has_empty ? 0 : 1;
+    // An emptied slot lets one more insert run on the fast path. growth_left_
+    // == 0 may have another reason, so that case recomputes it.
+    if (SFLAT_LIKELY(growth_left_ != 0 && deleted_ < tombstone_limit())) {
+      growth_left_ += has_empty ? 1 : 0;
     } else {
-      ctrl_[i] = detail::kDeleted;
-      if (++deleted_ >= tombstone_limit()) growth_left_ = 0;
+      reset_growth_left();
     }
   }
 

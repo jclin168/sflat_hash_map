@@ -1055,6 +1055,75 @@ is even faster for misses.
 | find miss | 10M | **13.1** | 15.6 |
 | erase | 10M | **32.2** | 33.4 |
 
+### All of Ankerl's workloads on the M2 (octave geomean)
+
+`bench/octave.cpp`, as in the Xeon section, with sflat, `sflat (base)` and
+boost in one binary (nanobench `compare()`, so drift cancels out of the
+ratios). 20 sizes per octave, `EPOCHS=60`, `SFLAT_PROCESS_SEED=1`, C++17,
+Apple clang 21.0.0, `-O3 -mcpu=native`, boost 1.86, macOS 27.2. `sflat
+(base)` is commit 73c9306 (main after PR #21).
+
+sflat / boost, ns per operation, geomean (below 1 means sflat is faster):
+
+| Workload | 1K before | 1K after | 32K before | 32K after | 500K before | 500K after |
+|---|---|---|---|---|---|---|
+| build | 1.06 | 1.03 | 1.05 | 1.00 | 1.05 | 1.01 |
+| reserved | 1.31 | 1.31 | 1.28 | 1.28 | 1.24 | 1.24 |
+| hit | 1.19 | 1.13 | 1.20 | 1.10 | 1.13 | 1.13 |
+| miss | 1.03 | 0.95 | 1.22 | 1.12 | 1.17 | 1.15 |
+| half | 0.48 | 0.45 | 0.49 | 0.46 | 0.84 | 0.82 |
+| bump | 1.09 | 1.03 | 1.11 | 1.03 | 1.08 | 1.06 |
+| iterate | 0.60 | 0.59 | 0.83 | 0.79 | 0.87 | 0.87 |
+| churn | 1.57 | 1.30 | 1.57 | 1.29 | 1.15 | 1.10 |
+| ie | 1.34 | 1.17 | 1.36 | 1.20 | 1.14 | 1.13 |
+
+What changed:
+
+- **Growth at once below 2 MiB** (`SFLAT_GROW_AT_ONCE_BELOW`). Only inserts
+  move a migration forward, so a build that stopped just past a growth
+  point stayed in the migration, and its lookups took the slow path: at
+  n = 57680, hits took 10.2 ns instead of 2.25 and misses 11.6 instead of
+  2.2 (separate test, random lookups). The slowest size per octave went
+  from 9.8 to 3.6 ns (hit, 1K) and from 13.1 to 4.6 ns (hit, 32K). The cost
+  is the worst insert in tables near 64K slots: about 290 us, against 150 us
+  for a limit of 1 MiB, 560 us for 4 MiB and 2.3 ms for 16 MiB.
+- **256 slots per migration step**, not 64: the window after a growth point
+  in larger tables is 4x shorter. The worst insert did not change (about 280
+  to 300 us), and the slowest size at 500K improved (half 26.5 to 18.1 ns).
+- **`erase` without a branch on "the group has an empty slot"**, which is
+  close to random near the load limit: churn 17 to 18 percent and ie 12
+  percent faster at 1K and 32K. In an earlier run on a header without
+  seeds, churn was 1 percent and ie 3 percent slower at 500K. In this run
+  both are faster there, 4 and 1 percent.
+- **build and reserved take fresh keys in every epoch.** With the same
+  keys in each epoch, the branch predictor learns the pattern of a map
+  whose hash is fixed in the process, but not of sflat, which seeds each
+  table. sflat without seeds built 1500 reserved keys in 2.8 ns per key
+  replayed and 3.7 ns fresh. This change moved build and reserved for all
+  maps, so their before columns above already use fresh keys.
+
+What remains, and why:
+
+- **reserved** (1.24 to 1.31): the load factor, not the code. `reserve(n)`
+  of sflat gives 1.14 slots per key, boost 1.28 to 1.40. With 1.12 n
+  reserved (1.28 slots per key), sflat took 3.20, 3.10 and 3.58 ns for
+  1500, 48000 and 700000 keys, against 3.43, 3.56 and 3.65 for boost.
+- **churn** (1.10 to 1.30): a real gap. At the same load, sflat is 1.15x
+  slower at load 0.6 and 1.3x to 1.5x at load 0.8. At 0.8, 42 percent of
+  the time is in `drop_tombstones()`. boost has no tombstones. A tombstone
+  limit of 1/16 (`SFLAT_TOMBSTONE_DIV=16`) made churn at load 0.8 18
+  percent faster in a fixed-load test, but in this benchmark it was 2
+  percent faster at 1K and 32K and 2 percent slower at 500K, so it stays
+  1/32.
+- Tried without gain: looking in the old table first during a migration
+  (hits 7 to 10 percent faster, misses 5 to 9 percent slower);
+  `SFLAT_PREFETCH_SLOTS=0`, `SFLAT_LAZY_OVERFLOW=0` and
+  `SFLAT_FIND_NEXT_INLINE=0` at these sizes (the NEON defaults stay).
+
+The growth and `erase` changes apply to all back ends. They were measured
+on the M2 only. On x86-64 the tests pass (SSE2, under Rosetta), but the
+speed and the latency were not measured.
+
 ### Assessment (M2)
 
 - **memory (steady state)**: sflat uses the least memory at all sizes
