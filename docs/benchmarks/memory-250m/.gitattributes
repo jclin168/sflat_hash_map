@@ -1,0 +1,3 @@
+# Preserve archived patch context and original raw CSV line endings.
+map_benchmark.patch -text -whitespace
+raw/*.csv -text whitespace=cr-at-eol
