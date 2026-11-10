@@ -1,0 +1,77 @@
+test_group_match OK (width 32)
+test_api_surface OK
+test_random_ops OK
+test_string_keys OK
+test_growth_factor OK (worst growth 2.000)
+test_sequential_keys OK
+test_hash_bits_structured_keys OK
+test_safety_net OK (0.070 s, constant hash 0.055 s)
+test_range_insert OK (0.013 s)
+test_copy_table OK (slot for slot)
+test_seed_modes OK (seed, 0.014 s)
+test_during_migration OK
+test_self_aliasing OK
+test_large_mixed OK (3 checks during growth)
+test_custom_allocator OK
+test_churn_fixed_size OK
+test_erase_others_while_iterating OK
+test_iterate_and_insert OK
+ALL CORRECTNESS TESTS PASSED
+growth tiers OK (2x: 7 steps, 1.5x: 3, 1.25x: 11)
+test_api_surface OK
+test_random_ops OK
+test_string_keys OK
+test_during_migration OK
+test_large_mixed OK (3 checks during growth)
+test_custom_allocator OK
+test_self_aliasing OK
+test_memory_per_slot OK (10.6 bytes/entry)
+test_churn_fixed_size OK
+test_erase_others_while_iterating OK
+test_iterate_and_insert OK
+test_safety_net OK (0.144 s)
+test_range_insert OK (0.013 s)
+test_copy_table OK
+ALL SET TESTS PASSED
+std::unordered_map: all interface tests OK
+sflat::flat_hash_map: all interface tests OK
+ALL MAP INTERFACE TESTS PASSED
+std::unordered_set: all interface tests OK
+sflat::flat_hash_set: all interface tests OK
+ALL SET INTERFACE TESTS PASSED
+copy correctness PASS
+copy correctness PASS
+test_group_match OK (width 32)
+test_api_surface OK
+test_random_ops OK
+test_string_keys OK
+test_growth_factor OK (worst growth 2.000)
+test_sequential_keys OK
+test_hash_bits_structured_keys OK
+test_safety_net OK (0.065 s, constant hash 0.066 s)
+test_range_insert OK (0.018 s)
+test_copy_table OK (slot for slot)
+test_seed_modes OK (seed, 0.024 s)
+test_during_migration OK
+test_self_aliasing OK
+test_large_mixed OK (3 checks during growth)
+test_custom_allocator OK
+test_churn_fixed_size OK
+test_erase_others_while_iterating OK
+test_iterate_and_insert OK
+ALL CORRECTNESS TESTS PASSED
+test_api_surface OK
+test_random_ops OK
+test_string_keys OK
+test_during_migration OK
+test_large_mixed OK (3 checks during growth)
+test_custom_allocator OK
+test_self_aliasing OK
+test_memory_per_slot OK (10.6 bytes/entry)
+test_churn_fixed_size OK
+test_erase_others_while_iterating OK
+test_iterate_and_insert OK
+test_safety_net OK (0.070 s)
+test_range_insert OK (0.012 s)
+test_copy_table OK
+ALL SET TESTS PASSED

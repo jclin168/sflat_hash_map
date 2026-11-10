@@ -1,0 +1,207 @@
+phase,variant,n,repeat,map,hash,test,measurement_id,measurement,actual_result,runtime_s,legacy_peak_delta_mib,rss_current_mib,rss_minus_input_baseline_mib,rss_peak_mib,rss_input_baseline_mib,rss_peak_minus_input_baseline_mib
+initial,before,1000000,0,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,3.86631,70.3438,62.5664,60.8047,80.4688,1.76172,78.707
+initial,before,1000000,0,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,4.21277,91.4805,81.6445,79.8828,101.605,1.76172,99.8438
+initial,after,1000000,0,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,0.501376,64.7422,56.793,55.0625,74.8672,1.73047,73.1367
+initial,after,1000000,0,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,0.360761,65.5703,75.8867,74.1562,75.6953,1.73047,73.9648
+initial,ankerl,1000000,0,ankerl::unordered_dense::map,std::hash,Copy,01,copy ctor,300019900,0.527303,85.918,80.6914,78.9609,96.043,1.73047,94.3125
+initial,ankerl,1000000,0,ankerl::unordered_dense::map,std::hash,Copy,02,copy assignment,600039800,1.47122,90.0117,80.6875,78.957,100.137,1.73047,98.4062
+initial,ankerl,1000000,1,ankerl::unordered_dense::map,std::hash,Copy,01,copy ctor,300019900,0.517055,85.9141,80.7109,78.9609,96.0391,1.75,94.2891
+initial,ankerl,1000000,1,ankerl::unordered_dense::map,std::hash,Copy,02,copy assignment,600039800,1.51092,90.0078,80.707,78.957,100.133,1.75,98.3828
+initial,after,1000000,1,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,0.520847,64.7578,56.8086,55.0625,74.8828,1.74609,73.1367
+initial,after,1000000,1,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,0.349594,65.5859,75.9023,74.1562,75.7109,1.74609,73.9648
+initial,before,1000000,1,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,3.60204,70.3828,62.6172,60.8672,80.5078,1.75,78.7578
+initial,before,1000000,1,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,3.90711,91.5195,81.6953,79.9453,101.645,1.75,99.8945
+initial,before,1000000,2,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,3.58835,70.9453,63.1523,61.3984,81.0703,1.75391,79.3164
+initial,before,1000000,2,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,3.99929,91.4805,81.6367,79.8828,101.605,1.75391,99.8516
+initial,after,1000000,2,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,0.515459,64.7422,56.793,55.0625,74.8672,1.73047,73.1367
+initial,after,1000000,2,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,0.343783,65.5703,75.8867,74.1562,75.6953,1.73047,73.9648
+initial,ankerl,1000000,2,ankerl::unordered_dense::map,std::hash,Copy,01,copy ctor,300019900,0.554125,85.918,80.7148,79,96.043,1.71484,94.3281
+initial,ankerl,1000000,2,ankerl::unordered_dense::map,std::hash,Copy,02,copy assignment,600039800,1.46268,90.0117,80.7109,78.9961,100.137,1.71484,98.4219
+initial,ankerl,1000000,3,ankerl::unordered_dense::map,std::hash,Copy,01,copy ctor,300019900,0.514781,85.918,80.7031,78.9609,96.043,1.74219,94.3008
+initial,ankerl,1000000,3,ankerl::unordered_dense::map,std::hash,Copy,02,copy assignment,600039800,1.4213,90.0117,80.6992,78.957,100.137,1.74219,98.3945
+initial,after,1000000,3,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,0.494549,64.7461,56.7969,55.0625,74.8711,1.73438,73.1367
+initial,after,1000000,3,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,0.361672,65.5742,75.8906,74.1562,75.6992,1.73438,73.9648
+initial,before,1000000,3,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,3.89364,70.375,62.6094,60.8672,80.5,1.74219,78.7578
+initial,before,1000000,3,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,3.90797,91.5117,81.6875,79.9453,101.637,1.74219,99.8945
+initial,before,1000000,4,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,3.50279,70.8594,63.1875,61.4609,80.9844,1.72656,79.2578
+initial,before,1000000,4,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,3.94071,91.3945,81.6719,79.9453,101.52,1.72656,99.793
+initial,after,1000000,4,sflat::flat_hash_map,std::hash,Copy,01,copy ctor,300019900,0.50553,64.7656,56.8164,55.0625,74.8906,1.75391,73.1367
+initial,after,1000000,4,sflat::flat_hash_map,std::hash,Copy,02,copy assignment,600039800,0.353378,65.5938,75.9102,74.1562,75.7188,1.75391,73.9648
+initial,ankerl,1000000,4,ankerl::unordered_dense::map,std::hash,Copy,01,copy ctor,300019900,0.550329,85.918,80.6953,78.9609,96.043,1.73438,94.3086
+initial,ankerl,1000000,4,ankerl::unordered_dense::map,std::hash,Copy,02,copy assignment,600039800,1.40903,90.0117,80.6914,78.957,100.137,1.73438,98.4023
+initial,before,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0210316,18.582,28.8281,19.3906,28.707,9.4375,19.2695
+initial,before,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0101742,18.582,28.8281,19.3906,28.707,9.4375,19.2695
+initial,before,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00723819,18.582,28.8281,19.3906,28.707,9.4375,19.2695
+initial,after,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0130118,18.5703,28.8438,19.3906,28.8203,9.45312,19.3672
+initial,after,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0118646,18.6953,28.8438,19.3906,28.8203,9.45312,19.3672
+initial,after,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00869002,18.6953,28.8438,19.3906,28.8203,9.45312,19.3672
+initial,before,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0607962,37.3086,45.6172,36.168,47.5586,9.44922,38.1094
+initial,after,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0509106,37.3047,45.6133,36.168,47.5547,9.44531,38.1094
+initial,after,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0156586,18.5195,28.8242,19.3906,28.7695,9.43359,19.3359
+initial,after,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0100249,18.5195,28.8242,19.3906,28.7695,9.43359,19.3359
+initial,after,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00848998,18.5195,28.8242,19.3906,28.7695,9.43359,19.3359
+initial,before,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0131586,18.457,28.7969,19.3281,28.707,9.46875,19.2383
+initial,before,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0126441,18.457,28.7969,19.3281,28.707,9.46875,19.2383
+initial,before,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00947491,18.457,28.7969,19.3281,28.707,9.46875,19.2383
+initial,after,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0508761,37.2539,45.5977,36.1094,47.5039,9.48828,38.0156
+initial,before,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0488117,37.2305,45.5781,36.1094,47.4805,9.46875,38.0117
+initial,before,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0175015,18.457,28.8281,19.3906,28.707,9.4375,19.2695
+initial,before,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0100911,18.457,28.8281,19.3906,28.707,9.4375,19.2695
+initial,before,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.0179671,18.457,28.8281,19.3906,28.707,9.4375,19.2695
+initial,after,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0149259,18.5195,28.8281,19.3945,28.7695,9.43359,19.3359
+initial,after,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0113541,18.5195,28.8281,19.3945,28.7695,9.43359,19.3359
+initial,after,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00746487,18.5195,28.8281,19.3945,28.7695,9.43359,19.3359
+initial,before,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0584147,37.2305,45.6172,36.168,47.4805,9.44922,38.0312
+initial,after,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.059393,37.2969,45.6094,36.1719,47.5469,9.4375,38.1094
+initial,before,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.246095,257.254,267.645,189.527,267.629,78.1172,189.512
+initial,before,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.261002,257.379,267.645,189.527,267.629,78.1172,189.512
+initial,before,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.161696,257.379,267.645,189.527,267.629,78.1172,189.512
+initial,after,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.250871,257.27,267.598,189.461,267.52,78.1367,189.383
+initial,after,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.259104,257.27,267.598,189.461,267.52,78.1367,189.383
+initial,after,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.153373,257.27,267.598,189.461,267.52,78.1367,189.383
+initial,before,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.512493,353.898,352.418,274.336,364.148,78.082,286.066
+initial,after,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.577777,353.973,352.406,274.297,364.223,78.1094,286.113
+initial,after,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.268892,257.273,267.641,189.523,267.523,78.1172,189.406
+initial,after,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.265928,257.273,267.641,189.523,267.523,78.1172,189.406
+initial,after,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.168466,257.273,267.641,189.523,267.523,78.1172,189.406
+initial,before,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.235336,257.254,267.594,189.461,267.504,78.1328,189.371
+initial,before,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.267166,257.254,267.594,189.461,267.504,78.1328,189.371
+initial,before,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.166123,257.254,267.594,189.461,267.504,78.1328,189.371
+initial,after,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.517238,353.918,352.387,274.234,364.168,78.1523,286.016
+initial,before,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.574671,353.898,352.367,274.234,364.148,78.1328,286.016
+initial,before,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.243265,257.254,267.59,189.461,267.504,78.1289,189.375
+initial,before,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.25357,257.254,267.59,189.461,267.504,78.1289,189.375
+initial,before,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.190042,257.254,267.59,189.461,267.504,78.1289,189.375
+initial,after,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.258512,257.27,267.609,189.461,267.52,78.1484,189.371
+initial,after,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.263067,257.27,267.609,189.461,267.52,78.1484,189.371
+initial,after,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.172039,257.27,267.609,189.461,267.52,78.1484,189.371
+initial,before,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.517325,353.898,352.363,274.234,364.148,78.1289,286.02
+initial,after,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.527472,353.914,352.371,274.234,364.164,78.1367,286.027
+extra,before,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0213642,18.582,28.7969,19.3281,28.707,9.46875,19.2383
+extra,before,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0125992,18.582,28.7969,19.3281,28.707,9.46875,19.2383
+extra,before,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00710603,18.582,28.7969,19.3281,28.707,9.46875,19.2383
+extra,after,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0168917,18.6016,28.8516,19.3867,28.8516,9.46484,19.3867
+extra,after,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0103082,18.7266,28.8516,19.3867,28.8516,9.46484,19.3867
+extra,after,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00672602,18.7266,28.8516,19.3867,28.8516,9.46484,19.3867
+extra,before,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0513058,37.3555,45.5703,36.1094,47.4805,9.46094,38.0195
+extra,after,1000000,0,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0588023,37.4258,45.6094,36.168,47.5508,9.44141,38.1094
+extra,after,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0155708,18.6484,28.8281,19.3906,28.7734,9.4375,19.3359
+extra,after,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0122693,18.6484,28.8281,19.3906,28.7734,9.4375,19.3359
+extra,after,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00727373,18.6484,28.8281,19.3906,28.7734,9.4375,19.3359
+extra,before,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0175932,18.582,28.832,19.3906,28.832,9.44141,19.3906
+extra,before,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0146046,18.707,28.832,19.3906,28.832,9.44141,19.3906
+extra,before,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00723126,18.707,28.832,19.3906,28.832,9.44141,19.3906
+extra,after,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0510509,37.375,45.6289,36.168,47.5,9.46094,38.0391
+extra,before,1000000,1,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0643404,37.3516,45.5742,36.1094,47.4766,9.46484,38.0117
+extra,before,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0160007,18.582,28.8438,19.3906,28.832,9.45312,19.3789
+extra,before,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0146338,18.707,28.8438,19.3906,28.832,9.45312,19.3789
+extra,before,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00759404,18.707,28.8438,19.3906,28.832,9.45312,19.3789
+extra,after,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0151507,18.5781,28.8516,19.3867,28.8281,9.46484,19.3633
+extra,after,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0103563,18.7031,28.8516,19.3867,28.8281,9.46484,19.3633
+extra,after,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00913136,18.7031,28.8516,19.3867,28.8281,9.46484,19.3633
+extra,before,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0526931,37.3555,45.6172,36.168,47.4805,9.44922,38.0312
+extra,after,1000000,2,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0528084,37.4297,45.6133,36.168,47.5547,9.44531,38.1094
+extra,after,1000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0222471,18.6016,28.8125,19.3281,28.7266,9.48438,19.2422
+extra,after,1000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0154369,18.6016,28.8125,19.3281,28.7266,9.48438,19.2422
+extra,after,1000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.006953,18.6016,28.8125,19.3281,28.7266,9.48438,19.2422
+extra,before,1000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0136234,18.582,28.7969,19.3281,28.707,9.46875,19.2383
+extra,before,1000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0131943,18.582,28.7969,19.3281,28.707,9.46875,19.2383
+extra,before,1000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00716069,18.582,28.7969,19.3281,28.707,9.46875,19.2383
+extra,after,1000000,3,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0506012,37.375,45.582,36.1055,47.5,9.47656,38.0234
+extra,before,1000000,3,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0559289,37.3555,45.6055,36.168,47.4805,9.4375,38.043
+extra,before,1000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0165338,18.5859,28.8477,19.3945,28.8359,9.45312,19.3828
+extra,before,1000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0101408,18.7109,28.8477,19.3945,28.8359,9.45312,19.3828
+extra,before,1000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00742853,18.7109,28.8477,19.3945,28.8359,9.45312,19.3828
+extra,after,1000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0188697,18.6602,28.8359,19.3906,28.7852,9.44531,19.3398
+extra,after,1000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0108792,18.6602,28.8359,19.3906,28.7852,9.44531,19.3398
+extra,after,1000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00777149,18.6602,28.8359,19.3906,28.7852,9.44531,19.3398
+extra,before,1000000,4,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0567532,37.3594,45.5781,36.1094,47.4844,9.46875,38.0156
+extra,after,1000000,4,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0509287,37.375,45.6289,36.168,47.5,9.46094,38.0391
+extra,after,1000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0183525,18.6016,28.7969,19.3281,28.7266,9.46875,19.2578
+extra,after,1000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0128747,18.6016,28.7969,19.3281,28.7266,9.46875,19.2578
+extra,after,1000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00625065,18.6016,28.7969,19.3281,28.7266,9.46875,19.2578
+extra,before,1000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0176595,18.582,28.8359,19.3906,28.832,9.44531,19.3867
+extra,before,1000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0104547,18.707,28.8359,19.3906,28.832,9.44531,19.3867
+extra,before,1000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00833879,18.707,28.8359,19.3906,28.832,9.44531,19.3867
+extra,after,1000000,5,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0505487,37.375,45.5859,36.1055,47.5,9.48047,38.0195
+extra,before,1000000,5,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0560926,37.3555,45.6094,36.168,47.4805,9.44141,38.0391
+extra,before,1000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0165301,18.582,28.8398,19.3945,28.832,9.44531,19.3867
+extra,before,1000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0114578,18.707,28.8398,19.3945,28.832,9.44531,19.3867
+extra,before,1000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00697408,18.707,28.8398,19.3945,28.832,9.44531,19.3867
+extra,after,1000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0201888,18.6055,28.8203,19.332,28.7305,9.48828,19.2422
+extra,after,1000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0109796,18.6055,28.8203,19.332,28.7305,9.48828,19.2422
+extra,after,1000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00705996,18.6055,28.8203,19.332,28.7305,9.48828,19.2422
+extra,before,1000000,6,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0486372,37.3789,45.6016,36.1094,47.5039,9.49219,38.0117
+extra,after,1000000,6,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.051351,37.4336,45.6172,36.168,47.5586,9.44922,38.1094
+extra,after,1000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0153787,18.6016,28.8516,19.3867,28.8516,9.46484,19.3867
+extra,after,1000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0135591,18.7266,28.8516,19.3867,28.8516,9.46484,19.3867
+extra,after,1000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00900385,18.7266,28.8516,19.3867,28.8516,9.46484,19.3867
+extra,before,1000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=1000000,1000000,0.0151538,18.4727,28.8164,19.3281,28.7227,9.48828,19.2344
+extra,before,1000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,3006270534025649595,0.0105064,18.4727,28.8164,19.3281,28.7227,9.48828,19.2344
+extra,before,1000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.00647674,18.4727,28.8164,19.3281,28.7227,9.48828,19.2344
+extra,after,1000000,7,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0564277,37.25,45.625,36.168,47.5,9.45703,38.043
+extra,before,1000000,7,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=1000000,1000000,0.0551865,37.2305,45.5742,36.1055,47.4805,9.46875,38.0117
+extra,before,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.257641,257.254,267.641,189.527,267.629,78.1133,189.516
+extra,before,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.26396,257.379,267.641,189.527,267.629,78.1133,189.516
+extra,before,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.162313,257.379,267.641,189.527,267.629,78.1133,189.516
+extra,after,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.253064,257.273,267.613,189.461,267.523,78.1523,189.371
+extra,after,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.251951,257.273,267.613,189.461,267.523,78.1523,189.371
+extra,after,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.162619,257.273,267.613,189.461,267.523,78.1523,189.371
+extra,before,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.522331,353.898,352.414,274.297,364.148,78.1172,286.031
+extra,after,10000000,0,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.576628,353.914,352.371,274.234,364.164,78.1367,286.027
+extra,after,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.258679,257.273,267.602,189.461,267.523,78.1406,189.383
+extra,after,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.258271,257.273,267.602,189.461,267.523,78.1406,189.383
+extra,after,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.163447,257.273,267.602,189.461,267.523,78.1406,189.383
+extra,before,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.241611,257.254,267.629,189.523,267.629,78.1055,189.523
+extra,before,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.263899,257.379,267.629,189.523,267.629,78.1055,189.523
+extra,before,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.165409,257.379,267.629,189.523,267.629,78.1055,189.523
+extra,after,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.514611,353.918,352.367,274.234,364.168,78.1328,286.035
+extra,before,10000000,1,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.506706,353.898,352.371,274.234,364.148,78.1367,286.012
+extra,before,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.256534,257.254,267.629,189.527,267.504,78.1016,189.402
+extra,before,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.300307,257.254,267.629,189.527,267.504,78.1016,189.402
+extra,before,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.164237,257.254,267.629,189.527,267.504,78.1016,189.402
+extra,after,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.265341,257.27,267.598,189.461,267.52,78.1367,189.383
+extra,after,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.330349,257.27,267.598,189.461,267.52,78.1367,189.383
+extra,after,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.259104,257.27,267.598,189.461,267.52,78.1367,189.383
+extra,before,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.647613,353.898,352.367,274.234,364.148,78.1328,286.016
+extra,after,10000000,2,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.700397,353.918,352.387,274.234,364.168,78.1523,286.016
+extra,after,10000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.362837,257.273,267.605,189.461,267.523,78.1445,189.379
+extra,after,10000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.262612,257.273,267.605,189.461,267.523,78.1445,189.379
+extra,after,10000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.163203,257.273,267.605,189.461,267.523,78.1445,189.379
+extra,before,10000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.245404,257.27,267.613,189.461,267.52,78.1523,189.367
+extra,before,10000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.250836,257.27,267.613,189.461,267.52,78.1523,189.367
+extra,before,10000000,3,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.158537,257.27,267.613,189.461,267.52,78.1523,189.367
+extra,after,10000000,3,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.517561,353.918,352.391,274.234,364.168,78.1562,286.012
+extra,before,10000000,3,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.49344,353.898,352.367,274.234,364.148,78.1328,286.016
+extra,before,10000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.244677,257.254,267.598,189.461,267.504,78.1367,189.367
+extra,before,10000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.258149,257.254,267.598,189.461,267.504,78.1367,189.367
+extra,before,10000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.171465,257.254,267.598,189.461,267.504,78.1367,189.367
+extra,after,10000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.259486,257.32,267.625,189.523,267.57,78.1016,189.469
+extra,after,10000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.356432,257.32,267.625,189.523,267.57,78.1016,189.469
+extra,after,10000000,4,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.240854,257.32,267.625,189.523,267.57,78.1016,189.469
+extra,before,10000000,4,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.513877,353.898,352.367,274.234,364.148,78.1328,286.016
+extra,after,10000000,4,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.492644,353.918,352.414,274.297,364.168,78.1172,286.051
+extra,after,10000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.292438,257.273,267.645,189.523,267.523,78.1211,189.402
+extra,after,10000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.2584,257.273,267.645,189.523,267.523,78.1211,189.402
+extra,after,10000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.159589,257.273,267.645,189.523,267.523,78.1211,189.402
+extra,before,10000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.242857,257.316,267.621,189.523,267.566,78.0977,189.469
+extra,before,10000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.253685,257.316,267.621,189.523,267.566,78.0977,189.469
+extra,before,10000000,5,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.161993,257.316,267.621,189.523,267.566,78.0977,189.469
+extra,after,10000000,5,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.492508,353.918,352.379,274.234,364.168,78.1445,286.023
+extra,before,10000000,5,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.489527,353.898,352.367,274.234,364.148,78.1328,286.016
+extra,before,10000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.236134,257.254,267.598,189.461,267.504,78.1367,189.367
+extra,before,10000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.266467,257.254,267.598,189.461,267.504,78.1367,189.367
+extra,before,10000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.154059,257.254,267.598,189.461,267.504,78.1367,189.367
+extra,after,10000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.263871,257.328,267.629,189.523,267.578,78.1055,189.473
+extra,after,10000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.245507,257.328,267.629,189.523,267.578,78.1055,189.473
+extra,after,10000000,6,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.161914,257.328,267.629,189.523,267.578,78.1055,189.473
+extra,before,10000000,6,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.50514,353.898,352.367,274.238,364.148,78.1289,286.02
+extra,after,10000000,6,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.490806,353.918,352.387,274.234,364.168,78.1523,286.016
+extra,after,10000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.290281,257.273,267.652,189.523,267.648,78.1289,189.52
+extra,after,10000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.249106,257.398,267.652,189.523,267.648,78.1289,189.52
+extra,after,10000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.16502,257.398,267.652,189.523,267.648,78.1289,189.52
+extra,before,10000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,01,reserve+insert n=10000000,10000000,0.234058,257.254,267.602,189.465,267.504,78.1367,189.367
+extra,before,10000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,02,find_hit_random,11840249350381194635,0.262215,257.254,267.602,189.465,267.504,78.1367,189.367
+extra,before,10000000,7,sflat::flat_hash_map,std::hash,FlatMap64Reserved,03,find_miss,0,0.16136,257.254,267.602,189.465,267.504,78.1367,189.367
+extra,after,10000000,7,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.566297,353.918,352.375,274.234,364.168,78.1406,286.027
+extra,before,10000000,7,sflat::flat_hash_map,std::hash,FlatMap64Grow,01,insert_grow n=10000000,10000000,0.553797,353.898,352.395,274.297,364.148,78.0977,286.051

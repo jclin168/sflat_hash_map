@@ -167,7 +167,8 @@
 // A copy takes the source's table slot for slot (fast: no hashing, one
 // memcpy for elements that copy as bytes) when the source has at most
 // SFLAT_COPY_SLACK times the slots it needs; else it inserts into a table of
-// the minimum size (as small as possible, but slower). 0: always insert.
+// a compact size, rounded to a 4096-slot block within the same slack bound.
+// Values <= 1 use the exact minimum capacity. 0: always insert.
 #if !defined(SFLAT_COPY_SLACK)
 #define SFLAT_COPY_SLACK 1.25
 #endif
@@ -823,10 +824,35 @@ class flat_hash_map {
   }
 
   flat_hash_map& operator=(const flat_hash_map& other) {
-    if (this != &other) {
-      flat_hash_map tmp(other);
-      swap(tmp);
+    if (this == &other) return *this;
+    // Reuse default-allocator storage when every operation below is nonthrowing.
+    // Other value, hash, equality, and allocator types keep copy-and-swap.
+    if constexpr (kOwnMemory &&
+                  std::is_trivially_copy_constructible<value_type>::value &&
+                  std::is_trivially_destructible<value_type>::value &&
+                  std::is_nothrow_copy_assignable<Hash>::value &&
+                  std::is_nothrow_copy_assignable<KeyEqual>::value) {
+      if (cap_ == other.cap_ && !is_migrating() && can_clone_table(other)) {
+        clear();
+        hash_ = other.hash_;
+        equal_ = other.equal_;
+        mix_ = other.mix_;
+        max_load_factor_ = other.max_load_factor_;
+        std::memcpy(static_cast<void*>(slots_), other.slots_,
+                    cap_ * sizeof(slot_type));
+        std::memcpy(ctrl_, other.ctrl_, cap_);
+        std::memcpy(overflow_, other.overflow_,
+                    cap_ / kWidth * sizeof(detail::Overflow));
+        size_ = other.size_;
+        deleted_ = other.deleted_;
+        reseed_size_ = 0;
+        huge_hint_ = 0;
+        update_limit();
+        return *this;
+      }
     }
+    flat_hash_map tmp(other);
+    swap(tmp);
     return *this;
   }
 
@@ -938,6 +964,29 @@ class flat_hash_map {
     ctrl_[dst] = detail::H2(h);
   }
 
+  static bool can_clone_table(const flat_hash_map& other) noexcept {
+    return other.size_ != 0 && !other.is_migrating() &&
+           static_cast<double>(other.cap_) <=
+               SFLAT_COPY_SLACK *
+                   static_cast<double>(other.min_cap_for(other.size_));
+  }
+
+  // Round compact copies to a 4 KiB control-byte block. This leaves room for
+  // small updates without immediate migration. Keep the existing slack bound;
+  // SFLAT_COPY_SLACK <= 1 retains the exact minimum capacity.
+  size_t compact_copy_cap(size_t n) const noexcept {
+    const size_t need = min_cap_for(n);
+    constexpr size_t block = 4096;
+    if (SFLAT_COPY_SLACK <= 1 || need < block || need > kMaxCapacity)
+      return need;
+    const size_t extra = (block - need % block) % block;
+    if (extra > kMaxCapacity - need) return need;
+    const size_t rounded = need + extra;
+    return static_cast<double>(rounded) <=
+                   SFLAT_COPY_SLACK * static_cast<double>(need)
+               ? rounded : need;
+  }
+
   // Precondition: *this is empty and has no storage.
   void copy_elements_from(const flat_hash_map& other) {
     if (other.size_ == 0) return;
@@ -947,13 +996,11 @@ class flat_hash_map {
     // other has more than SFLAT_COPY_SLACK times the slots it needs: a table
     // just after a growth (load 0.44 at 2x) would give a copy twice the size
     // it needs, so that copy inserts instead (see the README, "Seed").
-    if (!other.is_migrating() &&
-        static_cast<double>(other.cap_) <=
-            SFLAT_COPY_SLACK * static_cast<double>(min_cap_for(other.size_))) {
+    if (can_clone_table(other)) {
       clone_table_from(other);
       return;
     }
-    rehash_to(min_cap_for(other.size_));
+    rehash_to(compact_copy_cap(other.size_));
     try {
       for_each_slot(other, [this](const value_type* s) { place_unique(*s); });
     } catch (...) {
