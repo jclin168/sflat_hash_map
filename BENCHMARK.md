@@ -786,6 +786,15 @@ GLIBC_TUNABLES=glibc.malloc.hugetlb=1 GEN=1 STEP=1000 ./build/big_insert 5000000
 sflat times of the three runs: 41.5, 37.0, 42.2 s. Peak RSS 24.3
 bytes/entry, end RSS 23.3 bytes/entry.
 
+A second run on another VM (Intel Xeon @ 2.10 GHz, 4 vCPUs, AVX-512, L3
+260 MiB, 15 GiB, the same build flags) gave the same result: only sflat
+finishes, boost and absl fail with `std::bad_alloc` at the same RSS, and
+ankerl is killed at 13.32 GiB, in 3 of 3 runs. sflat: 53.5, 60.7, 61.4 s
+(median 60.7 s, 121 ns/insert), longest pause 653 to 1260 ms, and the same
+memory (peak RSS 11.32 GiB, end 10.84 GiB, peak virtual 18.06 GiB). This
+CPU has a lower clock and half the L3, and the pauses are longer on this
+VM.
+
 - boost and absl: the table of 2^29 slots (8 GiB) is full at 470M
   entries. The next table has 2^30 slots (16 to 17 GiB), more than the
   memory of the machine, and its allocation fails.
