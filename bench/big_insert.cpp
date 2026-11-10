@@ -49,6 +49,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -76,7 +77,8 @@ struct Result {  // written by the child into a pipe
   long rss_end = 0, vm_peak = 0, vm_end = 0, huge = 0;
   size_t size = 0;
   long rss_peak = 0;    // filled in by the parent
-  int failed_signal = 0;  // parent: child killed (9: out of memory?) or -1
+  int failed_signal = 0;  // parent: signal of a killed child (9: out of
+                          // memory?), or minus its exit status (-3: bad_alloc)
 };
 
 std::vector<uint64_t> make_keys(size_t n) {
@@ -156,7 +158,18 @@ Result run_child(Result (*fn)(size_t), size_t n) {
   const pid_t pid = fork();
   if (pid == 0) {
     close(fd[0]);
-    const Result r = fn(n);
+    // If the map does not fit, the OOM killer should take this child, not
+    // another process of the machine.
+    if (FILE* f = std::fopen("/proc/self/oom_score_adj", "w")) {
+      std::fputs("1000", f);
+      std::fclose(f);
+    }
+    Result r;
+    try {
+      r = fn(n);
+    } catch (const std::bad_alloc&) {
+      _exit(3);  // the allocation of a table failed
+    }
     if (write(fd[1], &r, sizeof(r)) != static_cast<ssize_t>(sizeof(r)))
       _exit(1);
     _exit(0);
@@ -173,7 +186,9 @@ Result run_child(Result (*fn)(size_t), size_t n) {
   r.rss_peak = ru.ru_maxrss;  // KiB on Linux
   r.failed_signal = 0;
   if (!ok || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
-    r.failed_signal = WIFSIGNALED(status) ? WTERMSIG(status) : -1;
+    r.failed_signal = WIFSIGNALED(status) ? WTERMSIG(status)
+                      : WIFEXITED(status)  ? -WEXITSTATUS(status)
+                                           : -1;
   return r;
 }
 
@@ -237,9 +252,12 @@ int main(int argc, char** argv) {
       run_child(warmup_child, phys / 2);
       const Result x = run_child(maps[m].fn, n);
       if (x.failed_signal != 0) {
-        std::printf("run %d %-7s FAILED (%s %d), peak RSS before %.2f GiB\n",
-                    r + 1, maps[m].name,
-                    x.failed_signal > 0 ? "signal" : "exit", x.failed_signal,
+        const char* why = x.failed_signal == 9    ? "killed: out of memory?"
+                          : x.failed_signal == -3 ? "std::bad_alloc"
+                          : x.failed_signal > 0   ? "signal"
+                                                  : "exit status";
+        std::printf("run %d %-7s FAILED (%s, %d), peak RSS before %.2f GiB\n",
+                    r + 1, maps[m].name, why, x.failed_signal,
                     (x.rss_peak - base.rss_peak) / 1048576.0);
         continue;
       }
