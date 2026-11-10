@@ -726,6 +726,45 @@ run): the longest stop of one growth.
   tables above. A part of the sflat lead in the no-reserve rows of the
   other sections comes from THP.
 
+### 300M entries, no reserve, THP for all maps
+
+The same test at 300M. The key array (2.24 GiB) and the maps do not fit
+into the 15 GiB of this machine together, so the keys are made in the
+insert loop (`GEN=1`: splitmix64 of a counter, about 2 ns per key for all
+maps; the 200M times above do not include this). One timed block is 1000
+inserts (`STEP=1000`), so "longest pause" is the longest stop of one
+growth. Median of 3 runs, no run was killed.
+
+```bash
+GLIBC_TUNABLES=glibc.malloc.hugetlb=1 GEN=1 STEP=1000 ./build/big_insert 300000000 3
+```
+
+| Map | time s | ns/insert | longest pause ms | peak RSS GiB | end RSS GiB | peak virtual GiB | end virtual GiB | peak RSS B/entry | end RSS B/entry |
+|---|---|---|---|---|---|---|---|---|---|
+| sflat | 24.21 | 80.7 | **132** | **7.54** | 7.23 | 12.04 | 7.22 | **27.0** | 25.9 |
+| boost | **20.73** | **69.1** | 4132 | 12.00 | 8.00 | **12.00** | 8.00 | 43.0 | 28.6 |
+| ankerl | 28.51 | 95.0 | 4201 | 10.75 | **7.22** | 14.75 | 10.75 | 38.5 | **25.9** |
+| absl | 24.25 | 80.8 | 3457 | 12.75 | 8.50 | 12.75 | 8.50 | 45.6 | 30.4 |
+
+Times of the three runs: sflat 25.1, 24.2, 22.7 s; boost 20.1, 22.2,
+20.7 s; ankerl 30.8, 25.9, 28.5 s; absl 25.6, 22.6, 24.3 s.
+
+- Peak RSS: sflat needs 7.54 GiB, 37 percent less than boost (12.00) and
+  41 percent less than absl (12.75). boost and absl hold the old table
+  (4 GiB) and the new one (8 GiB) together during the last rehash; sflat
+  gives the old pages back during the migration. On a machine with 12 GiB
+  free, only sflat and ankerl could do this insert.
+- End RSS: sflat 7.23 GiB, the same as ankerl and less than boost (8.00)
+  and absl (8.50). Like at 200M, 300M is just after a growth step of sflat
+  (302M slots, limit 264M, 1.5x to 453M slots, load 0.66). boost and absl
+  grow to 2^29 slots (load 0.56).
+- Longest pause: 132 ms for sflat, 3.5 to 4.2 s for the others.
+- Time: boost is the fastest (20.7 s); sflat (24.2) and absl (24.3) are
+  1.17x of boost, ankerl 1.38x. The gap to boost is smaller than at 200M
+  (1.38x), since boost and absl now also move a full table at the end.
+- Peak virtual size: sflat 12.04 GiB (old + new table mapped), the same as
+  boost. ankerl has the largest (14.75 GiB) and keeps 10.75 GiB at the end.
+
 ### Ankerl's map_benchmark (d77af38)
 
 [jclin168/map_benchmark](https://github.com/jclin168/map_benchmark), branch
