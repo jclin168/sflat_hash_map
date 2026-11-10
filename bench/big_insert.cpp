@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
     }
   }
   // Median of the runs; memory minus the baseline, also in bytes/entry.
-  std::printf("\n| Map | time s | ns/op | worst 1M step ms | peak RSS GiB | "
+  std::printf("\n| Map | time s | ns/op | worst step ms | peak RSS GiB | "
               "end RSS GiB | peak VM GiB | end VM GiB | peak RSS B/entry | "
               "end RSS B/entry | huge pages GiB |\n"
               "|---|---|---|---|---|---|---|---|---|---|---|\n");

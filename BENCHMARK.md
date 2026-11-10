@@ -765,6 +765,45 @@ Times of the three runs: sflat 25.1, 24.2, 22.7 s; boost 20.1, 22.2,
 - Peak virtual size: sflat 12.04 GiB (old + new table mapped), the same as
   boost. ankerl has the largest (14.75 GiB) and keeps 10.75 GiB at the end.
 
+### 500M entries, no reserve, THP for all maps
+
+The same test as at 300M (`GEN=1`, `STEP=1000`), 3 runs. The child sets
+its `oom_score_adj` to 1000, so the OOM killer takes only the test child.
+`vm.overcommit_memory` is 0 (heuristic): the kernel refuses one
+allocation that is larger than the whole memory.
+
+```bash
+GLIBC_TUNABLES=glibc.malloc.hugetlb=1 GEN=1 STEP=1000 ./build/big_insert 500000000 3
+```
+
+| Map | result | time s | ns/insert | longest pause ms | peak RSS GiB | end RSS GiB | peak virtual GiB | end virtual GiB |
+|---|---|---|---|---|---|---|---|---|
+| sflat | done in 3 of 3 runs | 41.52 | 83.0 | 178 | 11.32 | 10.84 | 18.06 | 10.84 |
+| boost | `std::bad_alloc` in 3 of 3 runs, at 12.00 GiB RSS | | | | | | | |
+| ankerl | killed by the OOM killer in 3 of 3 runs, at 13.32 GiB RSS | | | | | | | |
+| absl | `std::bad_alloc` in 3 of 3 runs, at 12.75 GiB RSS | | | | | | | |
+
+sflat times of the three runs: 41.5, 37.0, 42.2 s. Peak RSS 24.3
+bytes/entry, end RSS 23.3 bytes/entry.
+
+- boost and absl: the table of 2^29 slots (8 GiB) is full at 470M
+  entries. The next table has 2^30 slots (16 to 17 GiB), more than the
+  memory of the machine, and its allocation fails.
+- ankerl: its 2^29 buckets are full at 429M entries (load 0.8). The
+  allocation of 2^30 buckets (8 GiB) passes, but the element vector (500M
+  x 16 bytes) and the buckets do not fit into the memory together.
+- sflat: 453M slots (7.2 GiB) are full at 396M entries; the table grows
+  1.5x to 679M slots (10.75 GiB, load 0.74). The migration gives the old
+  pages back, so the peak RSS is only 0.48 GiB above the end RSS. The
+  peak virtual size (18.06 GiB, old + new table mapped) is larger than
+  the memory; this is no problem, because it is not resident.
+- On this 15 GiB machine the largest no-reserve insert is about 470M
+  entries for boost and absl and about 429M for ankerl (their table
+  limits, computed). sflat can insert up to 594M entries (679M slots x
+  0.875) without one more growth. That growth goes to 849M slots (13.4
+  GiB, the 1.25x tier above 10 GiB) plus the part of the old table that is
+  not yet given back; this is near the limit of this machine (not tested).
+
 ### Ankerl's map_benchmark (d77af38)
 
 [jclin168/map_benchmark](https://github.com/jclin168/map_benchmark), branch
