@@ -1,0 +1,3 @@
+case,before_runtime_s,after_runtime_s,time_change_pct
+RandomFindString_1000000,35.52109,34.96823,-1.5564274632338226
+RandomDistinct2,6.997207,7.5545539999999995,7.965278145980226

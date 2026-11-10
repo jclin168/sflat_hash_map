@@ -812,6 +812,10 @@ Limits (common trade-offs of open addressing):
 
 ## Benchmark
 
+The [latest sflat-only reevaluation](docs/benchmarks/2026-11-10-sflat-reevaluation/README.md)
+covers all 20 original std::hash cases and 1M, 10M, and 100M controlled tests.
+The report includes copy results, time increases, RSS, virtual memory, and raw data.
+
 The full results are in [BENCHMARK.md](BENCHMARK.md). It covers four
 machines: an Intel Xeon @ 2.10 GHz with 15 GiB (AVX2), an Intel Celeron
 N5105 @ 2.00 GHz with 7 GiB and an Intel Core i5-3230M @ 2.60 GHz with
