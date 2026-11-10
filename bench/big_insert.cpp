@@ -26,6 +26,7 @@
 //
 //   ./big_insert [n] [runs]       default 200000000 3
 //   env: ONLY=sflat,boost         the maps to run
+//        GEN=1                    no key array: make the keys in the loop
 //        STEP=1000                inserts per timed block
 #include <sflat/flat_hash_map.hpp>
 
@@ -74,7 +75,8 @@ struct Result {  // written by the child into a pipe
   double seconds = 0, worst_step_ms = 0;
   long rss_end = 0, vm_peak = 0, vm_end = 0, huge = 0;
   size_t size = 0;
-  long rss_peak = 0;  // filled in by the parent
+  long rss_peak = 0;    // filled in by the parent
+  int failed_signal = 0;  // parent: child killed (9: out of memory?) or -1
 };
 
 std::vector<uint64_t> make_keys(size_t n) {
@@ -84,9 +86,19 @@ std::vector<uint64_t> make_keys(size_t n) {
   return k;
 }
 
+// GEN=1: no key array; insert makes key i from i (splitmix64 of a counter,
+// the same keys as make_keys()). For sizes where the key array and the map
+// do not fit into memory together.
+bool gen_keys() {
+  const char* g = std::getenv("GEN");
+  return g && *g == '1';
+}
+
 template <typename Map>
 Result insert_child(size_t n) {
-  const std::vector<uint64_t> keys = make_keys(n);
+  const bool gen = gen_keys();
+  const std::vector<uint64_t> keys = gen ? std::vector<uint64_t>() : make_keys(n);
+  uint64_t seed = 0x123456789ABCDEFULL;
   using Clock = std::chrono::steady_clock;
   const char* st = std::getenv("STEP");
   const size_t kStep = st && *st ? std::strtoull(st, nullptr, 10) : 1000000;
@@ -96,7 +108,11 @@ Result insert_child(size_t n) {
   auto ts = t0;
   for (size_t i = 0; i < n; i += kStep) {
     const size_t e = std::min(n, i + kStep);
-    for (size_t j = i; j < e; ++j) m.emplace(keys[j], j);
+    if (gen) {
+      for (size_t j = i; j < e; ++j) m.emplace(splitmix64(seed), j);
+    } else {
+      for (size_t j = i; j < e; ++j) m.emplace(keys[j], j);
+    }
     const auto t = Clock::now();
     r.worst_step_ms = std::max(
         r.worst_step_ms,
@@ -113,9 +129,10 @@ Result insert_child(size_t n) {
 }
 
 Result baseline_child(size_t n) {
-  const std::vector<uint64_t> keys = make_keys(n);
+  const std::vector<uint64_t> keys = gen_keys() ? std::vector<uint64_t>(1)
+                                                : make_keys(n);
   Result r;
-  r.size = keys.size() + (keys[n / 2] & 0);
+  r.size = keys.size() + (keys[keys.size() / 2] & 0);
   r.rss_end = proc_kib("/proc/self/status", "VmRSS:");
   r.vm_peak = proc_kib("/proc/self/status", "VmPeak:");
   r.vm_end = proc_kib("/proc/self/status", "VmSize:");
@@ -153,11 +170,10 @@ Result run_child(Result (*fn)(size_t), size_t n) {
   std::memset(&ru, 0, sizeof(ru));
   while (wait4(pid, &status, 0, &ru) < 0) {
   }
-  if (!ok || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    std::fprintf(stderr, "child failed\n");
-    std::exit(1);
-  }
   r.rss_peak = ru.ru_maxrss;  // KiB on Linux
+  r.failed_signal = 0;
+  if (!ok || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    r.failed_signal = WIFSIGNALED(status) ? WTERMSIG(status) : -1;
   return r;
 }
 
@@ -200,8 +216,8 @@ int main(int argc, char** argv) {
   const size_t phys = static_cast<size_t>(pages) * static_cast<size_t>(psize);
   const char* tun = std::getenv("GLIBC_TUNABLES");
   const char* st = std::getenv("STEP");
-  std::printf("# n=%zu runs=%d  STEP=%s  GLIBC_TUNABLES=%s\n", n, runs,
-              st ? st : "1000000", tun ? tun : "");
+  std::printf("# n=%zu runs=%d  STEP=%s  GEN=%d  GLIBC_TUNABLES=%s\n", n,
+              runs, st ? st : "1000000", gen_keys() ? 1 : 0, tun ? tun : "");
   {
     std::ifstream f("/sys/kernel/mm/transparent_hugepage/enabled");
     std::string l;
@@ -220,6 +236,13 @@ int main(int argc, char** argv) {
       const size_t m = (k + r) % maps.size();  // rotate the order
       run_child(warmup_child, phys / 2);
       const Result x = run_child(maps[m].fn, n);
+      if (x.failed_signal != 0) {
+        std::printf("run %d %-7s FAILED (%s %d), peak RSS before %.2f GiB\n",
+                    r + 1, maps[m].name,
+                    x.failed_signal > 0 ? "signal" : "exit", x.failed_signal,
+                    (x.rss_peak - base.rss_peak) / 1048576.0);
+        continue;
+      }
       res[m].push_back(x);
       std::printf(
           "run %d %-7s %6.2f s %6.1f ns/op  worst step %8.1f ms  "
@@ -238,6 +261,10 @@ int main(int argc, char** argv) {
               "end RSS B/entry | huge pages GiB |\n"
               "|---|---|---|---|---|---|---|---|---|---|---|\n");
   for (size_t m = 0; m < maps.size(); ++m) {
+    if (res[m].empty()) {
+      std::printf("| %s | failed | | | | | | | | | |\n", maps[m].name);
+      continue;
+    }
     std::vector<double> t, w, rp, re, vp, ve, h;
     for (const Result& x : res[m]) {
       t.push_back(x.seconds);
