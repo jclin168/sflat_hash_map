@@ -107,6 +107,24 @@ if(SFLAT_BUILD_BENCH)
         target_link_libraries(octave PRIVATE absl::flat_hash_map)
       endif()
     endif()
+    # Large no-reserve insert with time, RSS and virtual size
+    # (bench/big_insert.cpp); ankerl::unordered_dense when found.
+    add_executable(big_insert bench/big_insert.cpp)
+    target_link_libraries(big_insert PRIVATE sflat)
+    target_include_directories(big_insert PRIVATE ${SFLAT_BOOST_DIR})
+    target_compile_options(big_insert PRIVATE -O3 -Wall)
+    target_compile_definitions(big_insert PRIVATE NDEBUG)
+    if(absl_FOUND)
+      target_compile_definitions(big_insert PRIVATE HAS_ABSL)
+      target_link_libraries(big_insert PRIVATE absl::flat_hash_map)
+    endif()
+    find_path(SFLAT_UDM_DIR ankerl/unordered_dense.h
+      PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/unordered_dense/include
+      NO_DEFAULT_PATH)
+    if(SFLAT_UDM_DIR)
+      target_compile_definitions(big_insert PRIVATE HAS_UDM)
+      target_include_directories(big_insert PRIVATE ${SFLAT_UDM_DIR})
+    endif()
     # Optional Google sparsehash (header only): thirdparty/sparsehash/include
     # or the system.
     find_path(SFLAT_SPARSEHASH_DIR sparsehash/dense_hash_map

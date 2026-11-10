@@ -671,6 +671,61 @@ differences are in the noise). Octave churn and ie (`bench/octave.cpp`,
 | churn 500K | 142.0 | 144.7 | **124.9** | 179.9 | 188.3 | 185.1 |
 | ie 500K | 118.7 | 120.4 | **109.6** | 137.2 | 157.0 | 161.5 |
 
+### 200M entries, no reserve, THP for all maps
+
+`bench/big_insert.cpp`: insert 200M random `uint64_t -> uint64_t` keys into
+an empty map (no `reserve`), each map with its default hash. Each run is a
+forked child. Before the runs, a child touches and frees 3/4 of the memory
+twice; before each run, a child touches and frees 1/2 of it. The memory
+values are minus a baseline child that has only the key array (1.49 GiB).
+
+THP is on for all maps: sflat asks for it itself, and the maps that use
+malloc get it with `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` (glibc 2.39; the
+system setting is `madvise`). AnonHugePages at the end is the same as the
+RSS for all maps, so the whole table of each map is on 2 MiB pages.
+
+```bash
+GLIBC_TUNABLES=glibc.malloc.hugetlb=1 ./build/big_insert 200000000 3
+GLIBC_TUNABLES=glibc.malloc.hugetlb=1 STEP=1000 ./build/big_insert 200000000 1
+```
+
+Median of 3 runs (the maps in a different order in each run). Versions:
+sflat 7183dd5, Boost 1.83, unordered_dense 7c58a8b, Abseil 20260817.0.
+"Longest pause" is the slowest block of 1000 inserts (`STEP=1000`, one
+run): the longest stop of one growth.
+
+| Map | time s | ns/insert | longest pause ms | peak RSS GiB | end RSS GiB | peak virtual GiB | end virtual GiB | peak RSS B/entry | end RSS B/entry |
+|---|---|---|---|---|---|---|---|---|---|
+| sflat | 14.76 | 73.8 | **64.6** | **5.03** | 4.82 | 8.03 | 4.82 | **27.0** | 25.9 |
+| boost | **10.69** | **53.5** | 1748 | 6.00 | **4.00** | **6.00** | **4.00** | 32.2 | **21.5** |
+| ankerl | 14.28 | 71.4 | 2095 | 5.38 | 4.36 | 7.38 | 5.38 | 28.9 | 23.4 |
+| absl | 12.75 | 63.7 | 1609 | 6.38 | 4.25 | 6.38 | 4.25 | 34.2 | 22.8 |
+
+- sflat has the lowest peak RSS (5.03 GiB, boost 6.00, absl 6.38): the
+  migration gives the old pages back to the kernel. Its longest pause is
+  65 ms; the other maps stop for 1.6 to 2.1 s in one rehash.
+- sflat is the slowest in time here: 1.38x boost, 1.16x absl, about the
+  same as ankerl. Two causes:
+  - 200M is just after a growth step of sflat. The table of 201M slots
+    has its limit at 176M entries, so the last growth (1.5x, the table is
+    above 2 GiB) goes to 302M slots: load 0.66, end RSS 4.82 GiB. boost
+    has 2^28 slots (limit 235M), load 0.75, 4.00 GiB. At other sizes the
+    order of the end RSS can be the other way round.
+  - More element moves and slower moves. Up to 200M, sflat moves about
+    411M elements in total (176M + 117M + 59M + ...), boost about 235M. And one move costs
+    more: with `-DSFLAT_GROW_AT_ONCE_BELOW=(1ULL<<40)` (rehash at once, as
+    the other maps), the last growth stops for 4.5 s against 1.75 s for
+    boost, and the whole insert takes 19.5 to 20.9 s (peak RSS 8.03 GiB).
+    So the incremental migration is not the cost: it takes about 25
+    percent less time than the rehash at once.
+- Virtual size: sflat maps the new table while the old one is still
+  mapped, so the peak virtual size (8.03 GiB) is old + new, but the peak
+  RSS is not. ankerl keeps 1 GiB of virtual size above its RSS at the end
+  (the capacity of its element vector).
+- With THP for all maps, boost and absl are faster than in the THP-off
+  tables above. A part of the sflat lead in the no-reserve rows of the
+  other sections comes from THP.
+
 ### Ankerl's map_benchmark (d77af38)
 
 [jclin168/map_benchmark](https://github.com/jclin168/map_benchmark), branch
