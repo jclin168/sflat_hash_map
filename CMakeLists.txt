@@ -36,6 +36,14 @@ if(SFLAT_BUILD_TESTS)
   add_executable(set_interface tests/set_interface.cpp)
   target_link_libraries(set_interface PRIVATE sflat)
   target_compile_options(set_interface PRIVATE -O2 -Wall)
+  add_executable(copy_correctness tests/copy_correctness.cpp)
+  target_link_libraries(copy_correctness PRIVATE sflat)
+  target_compile_options(copy_correctness PRIVATE -O2 -Wall)
+  add_executable(copy_correctness_incremental tests/copy_correctness.cpp)
+  target_link_libraries(copy_correctness_incremental PRIVATE sflat)
+  target_compile_options(copy_correctness_incremental PRIVATE -O2 -Wall)
+  target_compile_definitions(copy_correctness_incremental PRIVATE
+    SFLAT_GROW_AT_ONCE_BELOW=0)
   # Small tables grow at once by default; these keep the small tables of the
   # tests on the incremental path, so a migration is still covered.
   foreach(t correctness set_correctness)

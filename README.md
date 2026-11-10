@@ -596,11 +596,20 @@ multipliers of the mixer (`include/sflat/hash_mix.hpp`), which
   (one `memcpy` for elements that copy as bytes), with no hashing or probing.
   A reserved table of 1M `uint64_t` pairs copies in 3.9 ms instead of 15.0 ms
   (1M `uint64_t -> std::string`: 17.6 instead of 28.3 ms). Otherwise, or while
-  the source migrates, the copy inserts into a table of the minimum size, so it
-  needs no more memory than before: a table right after a growth (load 0.44 at
-  2x) would give a copy twice the size it needs. Bytes per entry of a copy of a
+  the source migrates, the copy inserts into a compact table. The capacity
+  rounds up to a 4096-slot block if it stays within the same slack bound.
+  This gives small updates room before growth. Set `SFLAT_COPY_SLACK` to 0
+  or 1 to keep the exact minimum capacity. A value of 0 also disables
+  direct table copies. Copy assignment can reuse storage for trivial values
+  with the default allocator, equal capacities, stable tables, and hash and
+  equality objects whose copy assignment cannot throw. Other cases keep
+  copy-and-swap. A table just after growth (load 0.44 at 2x) still needs
+  compaction. The following measurements predate block rounding.
+  Bytes per entry of a copy of a
   table built without `reserve`: 19.1, 20.1 and 23.2 at 1M, 10M and 100M keys
   (19.1, 20.1 and 19.7 always inserting; 35.8, 29.0 and 23.2 with a slack of 2).
+  See the [Copy benchmark report](docs/benchmarks/copy-optimization/README.md)
+  for the block rounding and assignment reuse results.
 - It does not make the map safe against chosen keys: the mixer is not keyed,
   and `std::hash` of an integer or a string has no seed.
 - Seeds of a process start at a random value (`getrandom` on Linux,
@@ -744,7 +753,7 @@ Keep the same definitions across translation units; see
 | `SFLAT_USE_THP` | 1 | 0: keep `mmap` and page release, but give no huge page hints. |
 | `SFLAT_GROW_2X_BELOW` | 2 GiB | Tables smaller than this many bytes grow 2x. |
 | `SFLAT_GROW_1_5X_BELOW` | 10 GiB | Tables smaller than this grow 1.5x; larger tables grow 1.25x. |
-| `SFLAT_COPY_SLACK` | 1.25 | A copy takes the source's table slot for slot (fast) when the source has at most this many times the slots it needs, else it inserts into a table of the minimum size. 0: always insert (smallest copies); 2: faster copies of tables right after a growth, up to twice the memory. See "Seed". |
+| `SFLAT_COPY_SLACK` | 1.25 | A copy takes the source's table slot for slot (fast) when the source has at most this many times the slots it needs, else it inserts into a compact table rounded to a 4096-slot block within the same bound. Values <= 1 keep minimum capacity. 0: always insert (smallest copies); 2: faster copies of tables right after a growth, up to twice the memory. See "Seed". |
 | `SFLAT_GROW_AT_ONCE_BELOW` | 2 MiB | Tables smaller than this move all items when growth starts; 0 keeps all growth incremental. |
 | `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
 | `SFLAT_NO_AVX2` | 0 | 1: use SSE2 groups (16 bytes) in an AVX2 build. |

@@ -1,0 +1,4 @@
+source_capacity=2097152 copy_capacity=1146880 initial_copy_hashes=1000000 max_load=0.875
+iteration=0 entries=1000000 capacity=1146880 copy_capacity=1146880 copy_hashes=0
+iteration=199 entries=1000199 capacity=1146880 copy_capacity=1146880 copy_hashes=0
+total_copy_hashes=0
