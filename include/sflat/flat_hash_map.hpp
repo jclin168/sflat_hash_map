@@ -106,6 +106,13 @@
 // on NEON (measured on Apple M2), 0 elsewhere. On x86-64 the larger inlined
 // part made find() less likely to be inlined at all, and forcing it inline
 // slowed down inserts in the same function (i5-3230M, BENCHMARK.md).
+// SFLAT_MISS_EMPTY_EXIT=1 (with SFLAT_LAZY_OVERFLOW): below 5/8 load, find()
+// stops at an empty slot in the home group before it reads the overflow
+// word, so a miss in a group that is not full needs one memory read (as in
+// SwissTable).
+#if !defined(SFLAT_MISS_EMPTY_EXIT)
+#define SFLAT_MISS_EMPTY_EXIT 1
+#endif
 #if !defined(SFLAT_FIND_NEXT_INLINE)
 #if defined(SFLAT_SIMD_NEON)
 #define SFLAT_FIND_NEXT_INLINE 1
@@ -1379,6 +1386,17 @@ class flat_hash_map {
       m &= m - 1;
     }
     if (SFLAT_LIKELY(old_cap_ == 0)) {
+#if SFLAT_LAZY_OVERFLOW && SFLAT_MISS_EMPTY_EXIT
+      // A key spills past its home group only when the group is full, and a
+      // group that a key passed through never gets an empty slot back (see
+      // free_ctrl). So an empty slot in the home group proves a miss, from
+      // the control bytes already loaded: no read of the overflow array.
+      // Only below 5/8 load: above it many home groups are full, the test
+      // mispredicts, and misses got slower (Neoverse-V2: 0.80 load, 10M
+      // entries, 22 -> 26 ns; 0.50 load, 20.5 -> 17.7 ns).
+      if ((size_ + deleted_) * 8 < cap_ * 5 && g.Match(detail::kEmpty))
+        return nullptr;
+#endif
 #if SFLAT_LAZY_OVERFLOW
       const detail::Overflow ovf = overflow_[home] & detail::OverflowBit(h);
 #endif

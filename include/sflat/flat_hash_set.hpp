@@ -890,6 +890,17 @@ class flat_hash_set {
       m &= m - 1;
     }
     if (SFLAT_LIKELY(old_cap_ == 0)) {
+#if SFLAT_LAZY_OVERFLOW && SFLAT_MISS_EMPTY_EXIT
+      // A key spills past its home group only when the group is full, and a
+      // group that a key passed through never gets an empty slot back (see
+      // free_ctrl). So an empty slot in the home group proves a miss, from
+      // the control bytes already loaded: no read of the overflow array.
+      // Only below 5/8 load: above it many home groups are full, the test
+      // mispredicts, and misses got slower (Neoverse-V2: 0.80 load, 10M
+      // entries, 22 -> 26 ns; 0.50 load, 20.5 -> 17.7 ns).
+      if ((size_ + deleted_) * 8 < cap_ * 5 && g.Match(detail::kEmpty))
+        return nullptr;
+#endif
 #if SFLAT_LAZY_OVERFLOW
       const detail::Overflow ovf = overflow_[home] & detail::OverflowBit(h);
 #endif

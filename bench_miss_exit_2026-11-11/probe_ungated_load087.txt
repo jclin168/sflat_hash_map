@@ -1,0 +1,16 @@
+r1 base sflat  cap=1142864    load=0.87 n=1000000    insert=  26.6 hit_rand=  22.9 miss=   9.7  THP_map=18 MiB rss=19 MiB
+r1 mx sflat  cap=1142864    load=0.87 n=1000000    insert=  17.0 hit_rand=  22.1 miss=  13.6  THP_map=18 MiB rss=19 MiB
+r1 base sflat  cap=11428576   load=0.87 n=10000000   insert=  42.8 hit_rand=  33.5 miss=  22.5  THP_map=192 MiB rss=192 MiB
+r1 mx sflat  cap=11428576   load=0.87 n=10000000   insert=  39.5 hit_rand=  34.9 miss=  28.5  THP_map=192 MiB rss=192 MiB
+r2 base sflat  cap=1142864    load=0.87 n=1000000    insert=  28.1 hit_rand=  23.3 miss=  11.5  THP_map=18 MiB rss=19 MiB
+r2 mx sflat  cap=1142864    load=0.87 n=1000000    insert=  19.3 hit_rand=  22.6 miss=  13.8  THP_map=18 MiB rss=19 MiB
+r2 base sflat  cap=11428576   load=0.87 n=10000000   insert=  45.7 hit_rand=  35.4 miss=  23.4  THP_map=192 MiB rss=192 MiB
+r2 mx sflat  cap=11428576   load=0.87 n=10000000   insert=  41.7 hit_rand=  37.1 miss=  31.6  THP_map=192 MiB rss=192 MiB
+r3 base sflat  cap=1142864    load=0.87 n=1000000    insert=  18.9 hit_rand=  23.2 miss=  10.2  THP_map=18 MiB rss=19 MiB
+r3 mx sflat  cap=1142864    load=0.87 n=1000000    insert=  17.1 hit_rand=  22.5 miss=  14.2  THP_map=18 MiB rss=19 MiB
+r3 base sflat  cap=11428576   load=0.87 n=10000000   insert=  46.5 hit_rand=  35.1 miss=  23.5  THP_map=192 MiB rss=192 MiB
+r3 mx sflat  cap=11428576   load=0.87 n=10000000   insert=  40.5 hit_rand=  34.7 miss=  28.7  THP_map=192 MiB rss=192 MiB
+r1 base sflat  cap=114285728  load=0.87 n=100000000  insert=  75.8 hit_rand=  43.6 miss=  41.6  THP_map=1882 MiB rss=1882 MiB
+r1 mx sflat  cap=114285728  load=0.87 n=100000000  insert=  69.0 hit_rand=  42.2 miss=  46.5  THP_map=1882 MiB rss=1882 MiB
+r2 mx sflat  cap=114285728  load=0.87 n=100000000  insert=  69.6 hit_rand=  46.8 miss=  47.3  THP_map=1882 MiB rss=1882 MiB
+r2 base sflat  cap=114285728  load=0.87 n=100000000  insert=  69.4 hit_rand=  44.7 miss=  43.7  THP_map=1882 MiB rss=1882 MiB
