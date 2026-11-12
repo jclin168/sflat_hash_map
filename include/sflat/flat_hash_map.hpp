@@ -258,7 +258,7 @@ inline size_t Fastrange(uint64_t h, size_t n) noexcept {
 // Tombstones (as a share of the slots, 1/N) that start an in-place
 // rebuild below the load limit.
 #if !defined(SFLAT_TOMBSTONE_DIV)
-#define SFLAT_TOMBSTONE_DIV 32
+#define SFLAT_TOMBSTONE_DIV 16
 #endif
 
 #if !defined(SFLAT_OVERFLOW_BITS)
@@ -1800,11 +1800,11 @@ class flat_hash_map {
   }
 
   // Slots that entries and tombstones together may fill before an in-place
-  // rebuild: the load limit plus a quarter of the slots above it (0.906 at
+  // rebuild: the load limit plus 3/8 of the slots above it (0.922 at
   // the default 0.875). Entries alone grow the table at the load limit. Were
   // tombstones held to the load limit too, a table just below it would
   // rebuild every few erases.
-  size_t used_limit() const noexcept { return limit_ + (cap_ - limit_) / 4; }
+  size_t used_limit() const noexcept { return limit_ + (cap_ - limit_) * 3 / 8; }
 
   // Tombstones that start an in-place rebuild even below the load limit.
   // They sit in groups that were probed past, and those groups do not get

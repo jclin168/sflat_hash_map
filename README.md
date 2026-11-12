@@ -364,7 +364,7 @@ through a source file or mix differently configured headers across objects.
 | Reproducible experiments | `SFLAT_PROCESS_SEED=1` | Repeats the seed sequence; tables still get different seeds; execution order and build also matter |
 | SIMD comparison or fallback | `SFLAT_NO_AVX2=1` or `SFLAT_NO_SIMD=1` | Changes group width and memory/probe behavior; benchmark on the deployment target |
 | NEON or unusual hit/miss mix | Compare `SFLAT_PREFETCH_SLOTS`, `SFLAT_LAZY_OVERFLOW`, `SFLAT_FIND_NEXT_INLINE` | Defaults are platform-specific; larger inlined paths and prefetches can hurt other workloads |
-| Frequent erase/insert churn | Try `SFLAT_TOMBSTONE_DIV=64` versus the default 32 | Starts in-place cleanup at fewer tombstones; extra cleanup work may outweigh shorter probes |
+| Frequent erase/insert churn | Try `SFLAT_TOMBSTONE_DIV=32` versus the default 16 | Starts in-place cleanup at fewer tombstones; extra cleanup work may outweigh shorter probes |
 | Miss-heavy queries or tight metadata budget | Compare `SFLAT_OVERFLOW_BITS=8`, `16`, `32`, `64` | Wider overflow filters use more metadata and can reject more false-positive probes |
 | Frequent copies under a memory budget | Try `SFLAT_COPY_SLACK=0` | Copies into minimum capacity, with more hashing/insertion work |
 
@@ -505,10 +505,10 @@ tombstone and a clear overflow bit uses the tombstone at once.
 Tombstones are removed in place, as in abseil (`drop_tombstones()`). The
 in-place rebuild allocates no memory. It runs in two cases:
 
-- Entries and tombstones together reach the load limit plus a quarter of
-  the slots above it (0.906 at the default 0.875). The table still grows
+- Entries and tombstones together reach the load limit plus 3/8 of
+  the slots above it (0.922 at the default 0.875). The table still grows
   when the entries alone reach the load limit.
-- The tombstones reach 1/32 of the slots (`SFLAT_TOMBSTONE_DIV`). Groups
+- The tombstones reach 1/16 of the slots (`SFLAT_TOMBSTONE_DIV`). Groups
   that were full keep their tombstones until a rebuild, so without this
   limit, probes get longer while erases and inserts continue.
 
@@ -758,7 +758,7 @@ Keep the same definitions across translation units; see
 | `SFLAT_NO_SIMD` | 0 | 1: use the portable SWAR group (8 bytes) instead of AVX2, SSE2 or NEON. |
 | `SFLAT_NO_AVX2` | 0 | 1: use SSE2 groups (16 bytes) in an AVX2 build. |
 | `SFLAT_OVERFLOW_BITS` | 32 | Bits per group in the overflow Bloom filter: 8, 16, 32 or 64. See "Overflow word". |
-| `SFLAT_TOMBSTONE_DIV` | 32 | Tombstones in 1/N of the slots start an in-place rebuild below the load limit. See "erase". |
+| `SFLAT_TOMBSTONE_DIV` | 16 | Tombstones in 1/N of the slots start an in-place rebuild below the load limit. See "erase". |
 | `SFLAT_PREFETCH_SLOTS` | 1 with NEON, else 0 | 1: `find()` prefetches the home group's slots before it reads the control bytes. |
 | `SFLAT_LAZY_OVERFLOW` | 1 with NEON, else 0 | 1: `find()` reads the overflow word only when no key in the home group matched. |
 | `SFLAT_FIND_NEXT_INLINE` | 1 with NEON, else 0 | 1: the probe of the group after the home group is inlined in `find()`. |
