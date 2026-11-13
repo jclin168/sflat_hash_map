@@ -2,7 +2,8 @@
 // Copyright 2026 Jian-Cheng Lin
 // Benchmark: sflat::flat_hash_map vs emhash8::HashMap vs
 // boost::unordered_flat_map vs boost::unordered_map vs std::unordered_map,
-// and with -DHAS_ABSL also absl::flat_hash_map and absl::node_hash_map,
+// with -DHAS_UDM also ankerl::unordered_dense::map, and with -DHAS_ABSL also
+// absl::flat_hash_map and absl::node_hash_map,
 // and with -DHAS_SPARSEHASH also google::dense_hash_map and
 // google::sparse_hash_map, with -DHAS_TSL also tsl::robin_map (power of two,
 // mod and prime growth policies), with -DHAS_SKA also ska::flat_hash_map
@@ -25,6 +26,10 @@
 #include <boost/unordered/unordered_map.hpp>
 
 #include <unordered_map>
+
+#ifdef HAS_UDM
+#include <ankerl/unordered_dense.h>
+#endif
 
 #ifdef HAS_SPARSEHASH
 #include <sparsehash/dense_hash_map>
@@ -340,6 +345,9 @@ const Entry kMaps[] = {
     SFLAT_BENCH_MAP("emhash8", emhash8::HashMap<uint64_t, uint64_t>),
     SFLAT_BENCH_MAP("boost_flat", boost::unordered_flat_map<uint64_t, uint64_t>),
     SFLAT_BENCH_MAP("boost_node", boost::unordered_map<uint64_t, uint64_t>),
+#ifdef HAS_UDM
+    SFLAT_BENCH_MAP("ankerl", ankerl::unordered_dense::map<uint64_t, uint64_t>),
+#endif
 #ifdef HAS_ABSL
     SFLAT_BENCH_MAP("absl_flat", absl::flat_hash_map<uint64_t, uint64_t>),
     SFLAT_BENCH_MAP("absl_node", absl::node_hash_map<uint64_t, uint64_t>),

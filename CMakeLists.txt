@@ -115,6 +115,14 @@ if(SFLAT_BUILD_BENCH)
         target_link_libraries(octave PRIVATE absl::flat_hash_map)
       endif()
     endif()
+    # Optional ankerl::unordered_dense (header only): thirdparty/unordered_dense.
+    find_path(SFLAT_UDM_DIR ankerl/unordered_dense.h
+      PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/unordered_dense/include
+      NO_DEFAULT_PATH)
+    if(SFLAT_UDM_DIR)
+      target_compile_definitions(bench PRIVATE HAS_UDM)
+      target_include_directories(bench PRIVATE ${SFLAT_UDM_DIR})
+    endif()
     # Optional Google sparsehash (header only): thirdparty/sparsehash/include
     # or the system.
     find_path(SFLAT_SPARSEHASH_DIR sparsehash/dense_hash_map
