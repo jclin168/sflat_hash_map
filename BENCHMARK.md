@@ -29,6 +29,10 @@ from the 32-bit overflow code before PR #11; the Celeron and M2 were
 measured before that, so their sflat miss and iterate rows are slower than
 the current code would give.
 
+A newer Xeon run with the latest main, ankerl::unordered_dense and a
+warm-up of the whole machine is in
+[bench_xeon_2026-11-13](bench_xeon_2026-11-13/README.md).
+
 ## Summary across machines
 
 sflat at the largest size of each machine, compared with the best other map

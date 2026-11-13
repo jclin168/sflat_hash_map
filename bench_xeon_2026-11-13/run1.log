@@ -1,0 +1,76 @@
+# maps: sflat emhash8 boost_flat boost_node ankerl absl_flat absl_node dense_hash sparse_hash std
+# sflat group: AVX2 x32, flags: -O3, __cplusplus 201703
+# times are ns/op; memory is child peak RSS minus baseline
+
+=== n = 1000000 ===
+A sflat      n=1000000   insert=   40.0 find_hit=   14.8 find_hit_rand=   16.6 find_miss=    9.8 erase=   47.1 iter=    3.7 ns/op  size=1000000->500000 sink=10548489543704826978
+A emhash8    n=1000000   insert=   47.8 find_hit=   16.9 find_hit_rand=   19.8 find_miss=   21.9 erase=   34.0 iter=    0.7 ns/op  size=1000000->500000 sink=10548489543704826978
+A boost_flat n=1000000   insert=   50.7 find_hit=   24.7 find_hit_rand=   16.5 find_miss=    8.8 erase=   24.7 iter=   14.7 ns/op  size=1000000->500000 sink=10548489543704826978
+A boost_node n=1000000   insert=  186.0 find_hit=   34.5 find_hit_rand=   37.0 find_miss=   26.1 erase=   51.8 iter=   17.2 ns/op  size=1000000->500000 sink=10548489543704826978
+A ankerl     n=1000000   insert=   35.4 find_hit=   14.2 find_hit_rand=   23.5 find_miss=   10.4 erase=   30.4 iter=    0.7 ns/op  size=1000000->500000 sink=10548489543704826978
+A absl_flat  n=1000000   insert=   44.5 find_hit=   15.3 find_hit_rand=   16.4 find_miss=   11.9 erase=   28.1 iter=   10.2 ns/op  size=1000000->500000 sink=10548489543704826978
+A absl_node  n=1000000   insert=   76.2 find_hit=   17.2 find_hit_rand=   26.2 find_miss=   13.0 erase=   48.1 iter=   18.1 ns/op  size=1000000->500000 sink=10548489543704826978
+A dense_hash n=1000000   insert=   36.6 find_hit=   14.7 find_hit_rand=   14.9 find_miss=   21.8 erase=   18.2 iter=   21.8 ns/op  size=1000000->500000 sink=10548489543704826978
+A sparse_hash n=1000000   insert=  208.6 find_hit=   80.4 find_hit_rand=   95.0 find_miss=   72.8 erase=  130.0 iter=   20.9 ns/op  size=1000000->500000 sink=10548489543704826978
+A std        n=1000000   insert=  132.9 find_hit=   33.3 find_hit_rand=   38.3 find_miss=   52.9 erase=  112.8 iter=   52.4 ns/op  size=1000000->500000 sink=10548489543704826978
+B sflat      n=1000000   insert_noreserve=   64.8 ns/op  buckets=2097152 sink=330523025586082733
+B emhash8    n=1000000   insert_noreserve=  113.2 ns/op  buckets=2097152 sink=330523025586082733
+B boost_flat n=1000000   insert_noreserve=   68.4 ns/op  buckets=1966079 sink=330523025586082733
+B boost_node n=1000000   insert_noreserve=  201.5 ns/op  buckets=1572869 sink=330523025586082733
+B ankerl     n=1000000   insert_noreserve=   60.8 ns/op  buckets=2097152 sink=330523025586082733
+B absl_flat  n=1000000   insert_noreserve=   59.5 ns/op  buckets=2097151 sink=330523025586082733
+B absl_node  n=1000000   insert_noreserve=  125.5 ns/op  buckets=2097151 sink=330523025586082733
+B dense_hash n=1000000   insert_noreserve=   69.9 ns/op  buckets=2097152 sink=330523025586082733
+B sparse_hash n=1000000   insert_noreserve=  341.3 ns/op  buckets=2097152 sink=330523025586082733
+B std        n=1000000   insert_noreserve=  254.2 ns/op  buckets=1447153 sink=330523025586082733
+  bytes/entry (steady): sflat=21.8 emhash8=34.3 boost_flat=35.0 boost_node=46.9 ankerl=29.0 absl_flat=37.1 absl_node=52.5 dense_hash=34.9 sparse_hash=19.9 std=42.1
+  bytes/entry (growth peak): sflat=41.0 emhash8=36.3 boost_flat=51.5 boost_node=46.9 ankerl=31.9 absl_flat=54.5 absl_node=58.6 dense_hash=51.4 sparse_hash=20.0 std=45.4
+
+=== n = 10000000 ===
+A sflat      n=10000000  insert=   33.4 find_hit=   25.6 find_hit_rand=   30.9 find_miss=   28.4 erase=   57.9 iter=    5.9 ns/op  size=10000000->5000000 sink=15214498454933446962
+A emhash8    n=10000000  insert=   66.9 find_hit=   22.8 find_hit_rand=   37.6 find_miss=   35.1 erase=   63.0 iter=    1.2 ns/op  size=10000000->5000000 sink=15214498454933446962
+A boost_flat n=10000000  insert=   59.0 find_hit=   32.6 find_hit_rand=   34.1 find_miss=   16.8 erase=   36.4 iter=   12.1 ns/op  size=10000000->5000000 sink=15214498454933446962
+A boost_node n=10000000  insert=  210.8 find_hit=   51.5 find_hit_rand=   64.6 find_miss=   61.1 erase=  126.6 iter=   42.5 ns/op  size=10000000->5000000 sink=15214498454933446962
+A ankerl     n=10000000  insert=   74.5 find_hit=   26.6 find_hit_rand=   66.3 find_miss=   20.3 erase=   65.2 iter=    1.1 ns/op  size=10000000->5000000 sink=15214498454933446962
+A absl_flat  n=10000000  insert=   69.9 find_hit=   36.8 find_hit_rand=   36.2 find_miss=   23.3 erase=   59.8 iter=   10.6 ns/op  size=10000000->5000000 sink=15214498454933446962
+A absl_node  n=10000000  insert=  134.6 find_hit=   29.9 find_hit_rand=   57.2 find_miss=   33.9 erase=  100.6 iter=   24.1 ns/op  size=10000000->5000000 sink=15214498454933446962
+A dense_hash n=10000000  insert=   58.7 find_hit=   36.5 find_hit_rand=   31.9 find_miss=   35.9 erase=   58.0 iter=   35.4 ns/op  size=10000000->5000000 sink=15214498454933446962
+A sparse_hash n=10000000  insert=  437.1 find_hit=  156.8 find_hit_rand=  164.9 find_miss=  131.1 erase=  211.8 iter=   36.6 ns/op  size=10000000->5000000 sink=15214498454933446962
+A std        n=10000000  insert=  268.3 find_hit=   67.0 find_hit_rand=   90.9 find_miss=   95.7 erase=  221.8 iter=   84.6 ns/op  size=10000000->5000000 sink=15214498454933446962
+B sflat      n=10000000  insert_noreserve=   64.7 ns/op  buckets=16777216 sink=17833147246295397537
+B emhash8    n=10000000  insert_noreserve=  136.4 ns/op  buckets=16777216 sink=17833147246295397537
+B boost_flat n=10000000  insert_noreserve=   73.8 ns/op  buckets=15728639 sink=17833147246295397537
+B boost_node n=10000000  insert_noreserve=  314.7 ns/op  buckets=12582917 sink=17833147246295397537
+B ankerl     n=10000000  insert_noreserve=   86.4 ns/op  buckets=16777216 sink=17833147246295397537
+B absl_flat  n=10000000  insert_noreserve=   86.2 ns/op  buckets=16777215 sink=17833147246295397537
+B absl_node  n=10000000  insert_noreserve=  201.6 ns/op  buckets=16777215 sink=17833147246295397537
+B dense_hash n=10000000  insert_noreserve=  132.6 ns/op  buckets=33554432 sink=17833147246295397537
+B sparse_hash n=10000000  insert_noreserve=  611.1 ns/op  buckets=16777216 sink=17833147246295397537
+B std        n=10000000  insert_noreserve=  470.2 ns/op  buckets=12117689 sink=17833147246295397537
+  bytes/entry (steady): sflat=20.0 emhash8=29.6 boost_flat=27.0 boost_node=42.8 ankerl=25.4 absl_flat=28.7 absl_node=47.2 dense_hash=53.8 sparse_hash=18.1 std=40.4
+  bytes/entry (growth peak): sflat=30.1 emhash8=29.6 boost_flat=40.4 boost_node=42.8 ankerl=36.2 absl_flat=42.9 absl_node=47.2 dense_hash=80.6 sparse_hash=18.1 std=41.9
+
+=== n = 100000000 ===
+A sflat      n=100000000 insert=   54.5 find_hit=   43.1 find_hit_rand=   48.9 find_miss=   29.9 erase=   99.8 iter=    5.3 ns/op  size=100000000->50000000 sink=12267343870491753086
+A emhash8    n=100000000 insert=  119.1 find_hit=   36.2 find_hit_rand=   60.4 find_miss=   37.8 erase=   92.7 iter=    1.2 ns/op  size=100000000->50000000 sink=12267343870491753086
+A boost_flat n=100000000 insert=   98.7 find_hit=   57.8 find_hit_rand=   60.0 find_miss=   41.3 erase=   71.1 iter=   13.2 ns/op  size=100000000->50000000 sink=12267343870491753086
+A boost_node n=100000000 insert=  327.3 find_hit=   70.0 find_hit_rand=   93.3 find_miss=   92.0 erase=  183.7 iter=   56.5 ns/op  size=100000000->50000000 sink=12267343870491753086
+A ankerl     n=100000000 insert=  108.3 find_hit=   49.3 find_hit_rand=   84.0 find_miss=   53.1 erase=  112.3 iter=    1.2 ns/op  size=100000000->50000000 sink=12267343870491753086
+A absl_flat  n=100000000 insert=  105.3 find_hit=   54.1 find_hit_rand=   55.7 find_miss=   51.2 erase=   87.4 iter=    9.9 ns/op  size=100000000->50000000 sink=12267343870491753086
+A absl_node  n=100000000 insert=  227.2 find_hit=   51.3 find_hit_rand=   80.7 find_miss=   57.9 erase=  157.0 iter=   28.2 ns/op  size=100000000->50000000 sink=12267343870491753086
+A dense_hash n=100000000 insert=   80.1 find_hit=   44.2 find_hit_rand=   44.6 find_miss=   52.4 erase=   57.8 iter=   30.6 ns/op  size=100000000->50000000 sink=12267343870491753086
+A sparse_hash n=100000000 insert=  741.6 find_hit=  254.4 find_hit_rand=  232.4 find_miss=  317.0 erase=  310.0 iter=   29.7 ns/op  size=100000000->50000000 sink=12267343870491753086
+A std        n=100000000 insert=  465.9 find_hit=   86.6 find_hit_rand=  108.1 find_miss=  124.8 erase=  329.3 iter=  125.2 ns/op  size=100000000->50000000 sink=12267343870491753086
+B sflat      n=100000000 insert_noreserve=   83.3 ns/op  buckets=134217728 sink=17846984540047152250
+B emhash8    n=100000000 insert_noreserve=  184.0 ns/op  buckets=134217728 sink=17846984540047152250
+B boost_flat n=100000000 insert_noreserve=  123.7 ns/op  buckets=125829119 sink=17846984540047152250
+B boost_node n=100000000 insert_noreserve=  436.4 ns/op  buckets=100663319 sink=17846984540047152250
+B ankerl     n=100000000 insert_noreserve=  145.1 ns/op  buckets=134217728 sink=17846984540047152250
+B absl_flat  n=100000000 insert_noreserve=  148.0 ns/op  buckets=134217727 sink=17846984540047152250
+B absl_node  n=100000000 insert_noreserve=  302.6 ns/op  buckets=134217727 sink=17846984540047152250
+B dense_hash n=100000000 insert_noreserve=  174.7 ns/op  buckets=268435456 sink=17846984540047152250
+B sparse_hash n=100000000 insert_noreserve=  921.7 ns/op  buckets=134217728 sink=17846984540047152250
+B std        n=100000000 insert_noreserve=  797.9 ns/op  buckets=101473717 sink=17846984540047152250
+  bytes/entry (steady): sflat=19.6 emhash8=26.8 boost_flat=21.5 boost_node=40.6 ankerl=23.4 absl_flat=22.8 absl_node=44.1 dense_hash=43.0 sparse_hash=17.8 std=40.1
+  bytes/entry (growth peak): sflat=23.8 emhash8=26.8 boost_flat=32.2 boost_node=40.6 ankerl=28.9 absl_flat=34.2 absl_node=44.1 dense_hash=64.4 sparse_hash=17.8 std=40.1
+
