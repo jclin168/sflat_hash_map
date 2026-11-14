@@ -209,6 +209,13 @@
 namespace sflat {
 namespace detail {
 
+// A std::pair whose first (without const) is Key: see emplace(pair).
+template <typename Key, typename P>
+struct IsKeyPair : std::false_type {};
+template <typename Key, typename A, typename B>
+struct IsKeyPair<Key, std::pair<A, B>>
+    : std::is_same<typename std::remove_const<A>::type, Key> {};
+
 inline constexpr uint8_t kEmpty = 0xFF;    // never used as H2
 inline constexpr uint8_t kDeleted = 0xFE;  // tombstone
 inline constexpr bool IsFull(uint8_t c) noexcept { return c < 0xFE; }
@@ -545,6 +552,8 @@ class flat_hash_map {
   using ctrl_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<uint8_t>;
   using ctrl_traits = std::allocator_traits<ctrl_alloc>;
 
+  template <typename P>
+  using is_key_pair = detail::IsKeyPair<Key, P>;
   using Group = detail::Group;
   using Mask = Group::Mask;
   static constexpr size_t kWidth = Group::kWidth;
@@ -560,6 +569,8 @@ class flat_hash_map {
       kWidth * kWidth;
   // Old slots migrated per insert during growth.
   static constexpr size_t kMigrateBatch = 256;  // multiple of kWidth
+  // huge_hint_ of a new table that has huge pages from the start.
+  static constexpr size_t kAllHuge = ~size_t{0};
   // Safety net: an insert that probes more slots than this past its home
   // group gives the table a new seed (see reseed()), at the default max load
   // factor; see reseed_probe() for higher ones. Random keys probe at most
@@ -1873,14 +1884,18 @@ class flat_hash_map {
   // ------------------------------------------------------------ growth
   // Start incremental migration to a new table. The old table is kept and
   // migrated in small steps to avoid latency spikes.
-  void begin_migration(size_t new_cap) {
+  void begin_migration(size_t new_cap, bool at_once = false) {
     check_capacity(new_cap);
     new_cap = align_cap(new_cap);
     assert(!is_migrating());
     // The new slots start without huge pages; migrate_step enables them just
     // ahead of the front, so stray writes far ahead do not commit whole huge
-    // pages.
-    slot_type* new_slots = alloc_slots(new_cap, false);
+    // pages. A growth at once (see SFLAT_GROW_AT_ONCE_BELOW) writes the whole
+    // table now, so it asks for huge pages from the start: the collapse at
+    // the end of a migration then has nothing to do, and the first touch
+    // faults in one huge page instead of 512 small ones. A growth from
+    // 1 MiB of slots to 2 MiB took 2.6 ms instead of 0.7 ms (i5-3230M).
+    slot_type* new_slots = alloc_slots(new_cap, at_once);
     uint8_t* new_ctrl = alloc_bytes(new_cap);
     std::memset(new_ctrl, detail::kEmpty, new_cap);
     const size_t new_ng = new_cap / kWidth;
@@ -1892,7 +1907,7 @@ class flat_hash_map {
     old_cap_ = cap_;
     mig_pos_ = 0;
     old_released_ = 0;
-    huge_hint_ = 0;
+    huge_hint_ = at_once ? kAllHuge : 0;
     // Old tombstones are dropped by the migration.
     deleted_ = 0;
     // Install new.
@@ -1901,6 +1916,13 @@ class flat_hash_map {
     overflow_ = new_overflow;
     cap_ = new_cap;
     update_limit();
+    // Hint the start of the new table before the first step writes it: else
+    // its first huge page faulted in as 512 small pages and was copied by the
+    // collapse at the end (uint64 keys, no reserve, 1.2M: 58 -> 55 ns per
+    // insert, i5-3230M).
+    if constexpr (kOwnMemory) {
+      if (!at_once) manage_pages();
+    }
   }
 
   // Move one full old slot into the new table.
@@ -1943,9 +1965,11 @@ class flat_hash_map {
       reset_growth_left();
       // Pages that were written before their huge page hint (rare) are
       // converted now.
-      if constexpr (kOwnMemory)
-        detail::PageHuge(slots_, cap_ * sizeof(slot_type), 0,
-                         cap_ * sizeof(slot_type), true);
+      if constexpr (kOwnMemory) {
+        if (huge_hint_ != kAllHuge)
+          detail::PageHuge(slots_, cap_ * sizeof(slot_type), 0,
+                           cap_ * sizeof(slot_type), true);
+      }
       huge_hint_ = 0;
       return;
     }
@@ -1991,7 +2015,7 @@ class flat_hash_map {
     if (size_ + 1 > limit_) {
       const bool at_once =
           cap_ * (sizeof(slot_type) + 1) < SFLAT_GROW_AT_ONCE_BELOW;
-      begin_migration(grown_cap(min_cap_for(size_ + 1)));
+      begin_migration(grown_cap(min_cap_for(size_ + 1)), at_once);
       if (at_once) {
         finish_migration();
       } else {
@@ -2036,7 +2060,7 @@ class flat_hash_map {
     const uint64_t old = mix_.mul;
     for (int i = 0; i < 4 && mix_.mul == old; ++i) mix_ = detail::Mixer::Next();
     reseed_size_ = size_ ? size_ : 1;
-    drop_tombstones();  // re-places every element with the new mixer
+    drop_tombstones(true);  // re-places every element with the new mixer
   }
 
   // Rebuild the table at the same size and in place, to remove the
@@ -2050,46 +2074,105 @@ class flat_hash_map {
   // group, it moves to an empty slot, or it swaps with another unplaced
   // element and that one is placed next. The groups that an element skips
   // were all placed and full, as a find expects. Not migrating.
-  void drop_tombstones() {
+  //
+  // Most of the time goes into hashing the elements again. A group that no
+  // key entered from an earlier group holds only keys of its own home, and
+  // they stay; so its elements keep their control bytes and are not hashed
+  // (about 40 percent of the groups at the load limit). No key enters a
+  // group after one with an empty slot (a group that a key passed or spilled
+  // from has none, see mark_erased()), nor after such a group whose overflow
+  // word is clear. all: every element is placed again (a new mixer).
+  void drop_tombstones(bool all = false) {
     assert(!is_migrating());
     const size_t ng = cap_ / kWidth;
-    // Full -> kDeleted, else kEmpty, 8 bytes at a time (cap_ is a multiple
-    // of 8): z has a zero byte where the byte is kEmpty or kDeleted.
+    uint8_t* const ctrl = ctrl_;
     static_assert(detail::kEmpty == 0xFF && detail::kDeleted == 0xFE, "");
+    static_assert(kWidth % 8 == 0, "");
     constexpr uint64_t kLo = 0x0101010101010101ULL;
     constexpr uint64_t k7F = 0x7F7F7F7F7F7F7F7FULL;
-    for (size_t i = 0; i < cap_; i += 8) {
-      uint64_t x;
-      std::memcpy(&x, ctrl_ + i, 8);
-      const uint64_t z = ~(x | kLo);
-      const uint64_t full = (((z & k7F) + k7F) | z) & ~k7F;  // 0x80: full
-      x = ~uint64_t{0} ^ (full >> 7);
-      std::memcpy(ctrl_ + i, &x, 8);
+    // The walk starts after a group with an empty slot. There is one below
+    // the used limit; else (a max load factor of 1) every group is placed
+    // again.
+    size_t start = 0;
+    while (!all && !Group::Load(ctrl + start * kWidth).Match(detail::kEmpty)) {
+      if (++start == ng) {
+        start = 0;
+        all = true;
+      }
+    }
+    bool kept = false;  // the previous group keeps its elements
+    bool open = false;  // a key may enter the next group from the previous
+    for (size_t k = 0, g = start; k < ng; ++k) {
+      if (++g == ng) g = 0;
+      uint8_t* const c = ctrl + g * kWidth;
+      // Read before the group changes: the next group's rule needs them.
+      const bool had_empty = Group::Load(c).Match(detail::kEmpty) != 0;
+      const bool spilled = overflow_[g] != 0;
+      const bool keep = !all && (k == 0 || !open);
+      for (size_t i = 0; i < kWidth; i += 8) {
+        uint64_t x;
+        std::memcpy(&x, c + i, 8);
+        if (keep) {
+          // kDeleted -> kEmpty (set the low bit), full bytes stay.
+          const uint64_t y = x ^ ~kLo;  // zero byte where x is kDeleted
+          const uint64_t del = ~(((y & k7F) + k7F) | y | k7F);  // 0x80
+          x |= del >> 7;
+        } else {
+          // Full -> kDeleted, else kEmpty. z has a zero byte where the byte
+          // is kEmpty or kDeleted.
+          const uint64_t z = ~(x | kLo);
+          const uint64_t full = (((z & k7F) + k7F) | z) & ~k7F;  // 0x80
+          x = ~uint64_t{0} ^ (full >> 7);
+        }
+        std::memcpy(c + i, &x, 8);
+      }
+      kept = keep;
+      open = !had_empty && (spilled || !kept);
     }
     std::memset(overflow_, 0, ng * sizeof(detail::Overflow));
     // Group by group with a mask, not slot by slot: whether a slot is full is
     // random, and a branch on it would mostly mispredict. An element moves
     // only to a later group, or wraps to a group already done, so the mask
-    // of the current group stays valid.
+    // of the current group stays valid. Within a group, the elements in
+    // their home group are placed first, without a branch on it; then the
+    // others.
+    // Local copies: the byte stores below could alias the members.
+    slot_type* const slots = slots_;
+    const detail::Mixer mix = mix_;
     for (size_t g0 = 0; g0 < cap_; g0 += kWidth) {
-      for (Mask un = Group::Load(ctrl_ + g0).Match(detail::kDeleted); un;
-           un &= un - 1)
-        place_unplaced(g0 + Group::Lane(un), ng);
+      Mask un = Group::Load(ctrl + g0).Match(detail::kDeleted);
+      if (!un) continue;
+      const size_t g = g0 / kWidth;
+      Mask away = 0;
+      uint64_t hs[kWidth];
+      for (Mask m = un; m; m &= m - 1) {
+        const unsigned lane = Group::Lane(m);
+        const uint64_t h = detail::HashKey(
+            hash_, reinterpret_cast<value_type*>(&slots[g0 + lane])->first, mix);
+        hs[lane] = h;
+        const bool at_home = detail::Fastrange(h, ng) == g;
+        ctrl[g0 + lane] = at_home ? detail::H2(h) : detail::kDeleted;
+        away |= at_home ? Mask{0} : (m & (Mask{0} - m));
+      }
+      for (; away; away &= away - 1) {
+        const unsigned lane = Group::Lane(away);
+        place_unplaced(g0 + lane, ng, hs[lane]);
+      }
     }
     deleted_ = 0;
     reset_growth_left();
   }
 
-  // Place the unplaced element in slot i (drop_tombstones()). A swap puts
-  // another unplaced element into slot i, which the loop then places.
-  void place_unplaced(size_t i, size_t ng) {
+  // Place the unplaced element in slot i (drop_tombstones()), whose mixed
+  // hash is h. A swap puts another unplaced element into slot i, which the
+  // loop then places.
+  void place_unplaced(size_t i, size_t ng, uint64_t h) {
     alignas(value_type) unsigned char buf[sizeof(value_type)];
     value_type* const tmp = reinterpret_cast<value_type*>(buf);
-    while (ctrl_[i] == detail::kDeleted) {
-      value_type* const s = slot_at(i);
-      const uint64_t h = hash_mixed(s->first);
+    for (;;) {
+      value_type* const s = cur_slot(i);
       const size_t home = detail::Fastrange(h, ng);
-      if (home == i / kWidth) {  // most elements: in the home group
+      if (home == i / kWidth) {
         ctrl_[i] = detail::H2(h);
         return;
       }
@@ -2107,7 +2190,7 @@ class flat_hash_map {
         return;
       }
       const size_t dst = gi * kWidth + Group::Lane(free);
-      value_type* const d = slot_at(dst);
+      value_type* const d = cur_slot(dst);
       if (ctrl_[dst] == detail::kEmpty) {
         ::new (static_cast<void*>(d)) value_type(std::move(*s));
         destroy_slot(i);
@@ -2123,6 +2206,7 @@ class flat_hash_map {
       ::new (static_cast<void*>(s)) value_type(std::move(*tmp));
       tmp->~value_type();
       ctrl_[dst] = detail::H2(h);
+      h = hash_mixed(s->first);
     }
   }
 
@@ -2284,8 +2368,12 @@ class flat_hash_map {
                 !std::is_same<typename std::decay<P>::type,
                               const value_type>::value>::type>
   std::pair<iterator, bool> insert(P&& obj) {
-    value_type v(std::forward<P>(obj));
-    return insert(std::move(v));
+    if constexpr (is_key_pair<typename std::decay<P>::type>::value) {
+      return emplace(std::forward<P>(obj));  // in place, see emplace(pair)
+    } else {
+      value_type v(std::forward<P>(obj));
+      return insert(std::move(v));
+    }
   }
 
   iterator insert(const_iterator hint, const value_type& v) {
@@ -2329,6 +2417,22 @@ class flat_hash_map {
   std::pair<iterator, bool> emplace(K&& k, M&& m) {
     return insert_with(k, [&](void* p) {
       ::new (p) value_type(std::forward<K>(k), std::forward<M>(m));
+    });
+  }
+
+  // emplace(pair) with a std::pair whose first is a key_type (value_type, or
+  // std::pair<Key, T> as from a vector of pairs): builds the element in place
+  // from the pair. Through the generic emplace the key was copied twice: into
+  // the temporary, and from it, as the temporary's key is const (for a long
+  // string key, two allocations). The same safety as emplace(key, mapped).
+  template <typename P,
+            typename std::enable_if<
+                is_key_pair<typename std::decay<P>::type>::value &&
+                    std::is_constructible<value_type, P&&>::value,
+                int>::type = 0>
+  std::pair<iterator, bool> emplace(P&& pr) {
+    return insert_with(pr.first, [&](void* p) {
+      ::new (p) value_type(std::forward<P>(pr));
     });
   }
 

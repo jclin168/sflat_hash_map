@@ -503,7 +503,9 @@ that was full, it leaves a tombstone. An insert whose home group has a
 tombstone and a clear overflow bit uses the tombstone at once.
 
 Tombstones are removed in place, as in abseil (`drop_tombstones()`). The
-in-place rebuild allocates no memory. It runs in two cases:
+in-place rebuild allocates no memory. A group that no key entered from an
+earlier group keeps its elements, which are not hashed again (about 40
+percent of the groups at the load limit). It runs in two cases:
 
 - Entries and tombstones together reach the load limit plus 3/8 of
   the slots above it (0.922 at the default 0.875). The table still grows
@@ -720,11 +722,14 @@ Large tables cause many TLB misses with 4 KiB pages. The map asks for huge
 pages with `madvise(MADV_HUGEPAGE)`:
 
 - control bytes, overflow words, and slots after `reserve()`: at once;
-- slots of a growing table: a 2 MiB page just ahead of the migration front.
-  Pages far ahead of the front stay `MADV_NOHUGEPAGE`, so a rare stray write
-  does not commit a full 2 MiB page;
-- at the end of a migration, `MADV_COLLAPSE` (Linux 6.1 and later) converts
-  the few 4 KiB pages that were written before their hint.
+- slots of a growing table: a 2 MiB page just ahead of the migration front
+  (the first one before the migration writes the table). Pages far ahead
+  of the front stay `MADV_NOHUGEPAGE`, so a rare stray write does not commit
+  a full 2 MiB page;
+- slots of a table that grows at once (below `SFLAT_GROW_AT_ONCE_BELOW`):
+  at once, as the growth writes the whole table;
+- at the end of an incremental migration, `MADV_COLLAPSE` (Linux 6.1 and
+  later) converts the few 4 KiB pages that were written before their hint.
 
 The system THP setting must be `madvise` or `always`
 (`/sys/kernel/mm/transparent_hugepage/enabled`). With `never`, the hints
