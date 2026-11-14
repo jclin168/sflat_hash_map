@@ -1589,8 +1589,12 @@ class flat_hash_set {
     // the used limit; else (a max load factor of 1) every group is placed
     // again.
     size_t start = 0;
-    while (!all && !Group::Load(ctrl + start * kWidth).Match(detail::kEmpty))
-      if (++start == ng) all = true;
+    while (!all && !Group::Load(ctrl + start * kWidth).Match(detail::kEmpty)) {
+      if (++start == ng) {
+        start = 0;
+        all = true;
+      }
+    }
     bool kept = false;  // the previous group keeps its elements
     bool open = false;  // a key may enter the next group from the previous
     for (size_t k = 0, g = start; k < ng; ++k) {
