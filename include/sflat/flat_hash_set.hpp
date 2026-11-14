@@ -1540,7 +1540,7 @@ class flat_hash_set {
     const uint64_t old = mix_.mul;
     for (int i = 0; i < 4 && mix_.mul == old; ++i) mix_ = detail::Mixer::Next();
     reseed_size_ = size_ ? size_ : 1;
-    drop_tombstones();  // re-places every element with the new mixer
+    drop_tombstones(true);  // re-places every element with the new mixer
   }
 
   // Rebuild the table at the same size and in place, to remove the
@@ -1554,46 +1554,101 @@ class flat_hash_set {
   // group, it moves to an empty slot, or it swaps with another unplaced
   // element and that one is placed next. The groups that an element skips
   // were all placed and full, as a find expects. Not migrating.
-  void drop_tombstones() {
+  //
+  // Most of the time goes into hashing the elements again. A group that no
+  // key entered from an earlier group holds only keys of its own home, and
+  // they stay; so its elements keep their control bytes and are not hashed
+  // (about 40 percent of the groups at the load limit). No key enters a
+  // group after one with an empty slot (a group that a key passed or spilled
+  // from has none, see mark_erased()), nor after such a group whose overflow
+  // word is clear. all: every element is placed again (a new mixer).
+  void drop_tombstones(bool all = false) {
     assert(!is_migrating());
     const size_t ng = cap_ / kWidth;
-    // Full -> kDeleted, else kEmpty, 8 bytes at a time (cap_ is a multiple
-    // of 8): z has a zero byte where the byte is kEmpty or kDeleted.
+    uint8_t* const ctrl = ctrl_;
     static_assert(detail::kEmpty == 0xFF && detail::kDeleted == 0xFE, "");
+    static_assert(kWidth % 8 == 0, "");
     constexpr uint64_t kLo = 0x0101010101010101ULL;
     constexpr uint64_t k7F = 0x7F7F7F7F7F7F7F7FULL;
-    for (size_t i = 0; i < cap_; i += 8) {
-      uint64_t x;
-      std::memcpy(&x, ctrl_ + i, 8);
-      const uint64_t z = ~(x | kLo);
-      const uint64_t full = (((z & k7F) + k7F) | z) & ~k7F;  // 0x80: full
-      x = ~uint64_t{0} ^ (full >> 7);
-      std::memcpy(ctrl_ + i, &x, 8);
+    // The walk starts after a group with an empty slot. There is one below
+    // the used limit; else (a max load factor of 1) every group is placed
+    // again.
+    size_t start = 0;
+    while (!all && !Group::Load(ctrl + start * kWidth).Match(detail::kEmpty))
+      if (++start == ng) all = true;
+    bool kept = false;  // the previous group keeps its elements
+    bool open = false;  // a key may enter the next group from the previous
+    for (size_t k = 0, g = start; k < ng; ++k) {
+      if (++g == ng) g = 0;
+      uint8_t* const c = ctrl + g * kWidth;
+      // Read before the group changes: the next group's rule needs them.
+      const bool had_empty = Group::Load(c).Match(detail::kEmpty) != 0;
+      const bool spilled = overflow_[g] != 0;
+      const bool keep = !all && (k == 0 || !open);
+      for (size_t i = 0; i < kWidth; i += 8) {
+        uint64_t x;
+        std::memcpy(&x, c + i, 8);
+        if (keep) {
+          // kDeleted -> kEmpty (set the low bit), full bytes stay.
+          const uint64_t y = x ^ ~kLo;  // zero byte where x is kDeleted
+          const uint64_t del = ~(((y & k7F) + k7F) | y | k7F);  // 0x80
+          x |= del >> 7;
+        } else {
+          // Full -> kDeleted, else kEmpty. z has a zero byte where the byte
+          // is kEmpty or kDeleted.
+          const uint64_t z = ~(x | kLo);
+          const uint64_t full = (((z & k7F) + k7F) | z) & ~k7F;  // 0x80
+          x = ~uint64_t{0} ^ (full >> 7);
+        }
+        std::memcpy(c + i, &x, 8);
+      }
+      kept = keep;
+      open = !had_empty && (spilled || !kept);
     }
     std::memset(overflow_, 0, ng * sizeof(detail::Overflow));
     // Group by group with a mask, not slot by slot: whether a slot is full is
     // random, and a branch on it would mostly mispredict. An element moves
     // only to a later group, or wraps to a group already done, so the mask
-    // of the current group stays valid.
+    // of the current group stays valid. Within a group, the elements in
+    // their home group are placed first, without a branch on it; then the
+    // others.
+    // Local copies: the byte stores below could alias the members.
+    slot_type* const slots = slots_;
+    const detail::Mixer mix = mix_;
     for (size_t g0 = 0; g0 < cap_; g0 += kWidth) {
-      for (Mask un = Group::Load(ctrl_ + g0).Match(detail::kDeleted); un;
-           un &= un - 1)
-        place_unplaced(g0 + Group::Lane(un), ng);
+      Mask un = Group::Load(ctrl + g0).Match(detail::kDeleted);
+      if (!un) continue;
+      const size_t g = g0 / kWidth;
+      Mask away = 0;
+      uint64_t hs[kWidth];
+      for (Mask m = un; m; m &= m - 1) {
+        const unsigned lane = Group::Lane(m);
+        const uint64_t h = detail::HashKey(
+            hash_, *reinterpret_cast<value_type*>(&slots[g0 + lane]), mix);
+        hs[lane] = h;
+        const bool at_home = detail::Fastrange(h, ng) == g;
+        ctrl[g0 + lane] = at_home ? detail::H2(h) : detail::kDeleted;
+        away |= at_home ? Mask{0} : (m & (Mask{0} - m));
+      }
+      for (; away; away &= away - 1) {
+        const unsigned lane = Group::Lane(away);
+        place_unplaced(g0 + lane, ng, hs[lane]);
+      }
     }
     deleted_ = 0;
     reset_growth_left();
   }
 
-  // Place the unplaced element in slot i (drop_tombstones()). A swap puts
-  // another unplaced element into slot i, which the loop then places.
-  void place_unplaced(size_t i, size_t ng) {
+  // Place the unplaced element in slot i (drop_tombstones()), whose mixed
+  // hash is h. A swap puts another unplaced element into slot i, which the
+  // loop then places.
+  void place_unplaced(size_t i, size_t ng, uint64_t h) {
     alignas(value_type) unsigned char buf[sizeof(value_type)];
     value_type* const tmp = reinterpret_cast<value_type*>(buf);
-    while (ctrl_[i] == detail::kDeleted) {
-      value_type* const s = slot_at(i);
-      const uint64_t h = hash_mixed(*s);
+    for (;;) {
+      value_type* const s = cur_slot(i);
       const size_t home = detail::Fastrange(h, ng);
-      if (home == i / kWidth) {  // most elements: in the home group
+      if (home == i / kWidth) {
         ctrl_[i] = detail::H2(h);
         return;
       }
@@ -1611,7 +1666,7 @@ class flat_hash_set {
         return;
       }
       const size_t dst = gi * kWidth + Group::Lane(free);
-      value_type* const d = slot_at(dst);
+      value_type* const d = cur_slot(dst);
       if (ctrl_[dst] == detail::kEmpty) {
         ::new (static_cast<void*>(d)) value_type(std::move(*s));
         destroy_slot(i);
@@ -1627,6 +1682,7 @@ class flat_hash_set {
       ::new (static_cast<void*>(s)) value_type(std::move(*tmp));
       tmp->~value_type();
       ctrl_[dst] = detail::H2(h);
+      h = hash_mixed(*s);
     }
   }
 
