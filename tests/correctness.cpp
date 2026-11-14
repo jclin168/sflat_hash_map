@@ -909,6 +909,46 @@ void test_self_aliasing() {
   std::printf("test_self_aliasing OK\n");
 }
 
+// emplace(pair) and insert(pair) build the element from the pair in place:
+// the key is copied once (or moved from an rvalue pair), not into a
+// temporary first and then out of it again.
+struct KeyCopies {
+  static int copies;
+  uint64_t v;
+  explicit KeyCopies(uint64_t x) : v(x) {}
+  KeyCopies(const KeyCopies& o) : v(o.v) { ++copies; }
+  KeyCopies(KeyCopies&& o) noexcept : v(o.v) {}
+  bool operator==(const KeyCopies& o) const { return v == o.v; }
+};
+int KeyCopies::copies = 0;
+struct KeyCopiesHash {
+  size_t operator()(const KeyCopies& k) const { return std::hash<uint64_t>()(k.v); }
+};
+
+void test_pair_emplace_copies() {
+  using M = sflat::flat_hash_map<KeyCopies, int, KeyCopiesHash>;
+  M m;
+  m.reserve(100);
+  const std::pair<KeyCopies, int> p(KeyCopies(1), 10);
+  const std::pair<const KeyCopies, int> v(KeyCopies(2), 20);
+  KeyCopies::copies = 0;
+  CHECK(m.emplace(p).second && KeyCopies::copies == 1);
+  CHECK(m.insert(v).second && KeyCopies::copies == 2);
+  CHECK(m.emplace(std::pair<KeyCopies, int>(KeyCopies(3), 30)).second &&
+        KeyCopies::copies == 2);
+  CHECK(m.insert(std::pair<KeyCopies, int>(KeyCopies(4), 40)).second &&
+        KeyCopies::copies == 2);
+  // Present keys: nothing is built.
+  CHECK(!m.emplace(p).second && !m.insert(p).second && !m.emplace(v).second);
+  CHECK(KeyCopies::copies == 2);
+  CHECK(m.size() == 4 && m.at(KeyCopies(1)) == 10 && m.at(KeyCopies(4)) == 40);
+  // Through growth too (the insert that grows builds a temporary first).
+  for (uint64_t i = 5; i < 5000; ++i)
+    CHECK(m.emplace(std::pair<KeyCopies, int>(KeyCopies(i), int(i))).second);
+  for (uint64_t i = 5; i < 5000; ++i) CHECK(m.at(KeyCopies(i)) == int(i));
+  std::printf("test_pair_emplace_copies OK\n");
+}
+
 // Erase one key and insert a new one, many times, at a fixed size: the
 // "churn" workload. Erase frees a slot or leaves a tombstone, and the
 // tombstones are removed in place, so the table must not grow, and every
@@ -1090,6 +1130,7 @@ int main() {
   test_seed_modes();
   test_during_migration();
   test_self_aliasing();
+  test_pair_emplace_copies();
   test_large_mixed();
   test_custom_allocator();
   test_churn_fixed_size();

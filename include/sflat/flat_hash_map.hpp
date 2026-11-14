@@ -209,6 +209,13 @@
 namespace sflat {
 namespace detail {
 
+// A std::pair whose first (without const) is Key: see emplace(pair).
+template <typename Key, typename P>
+struct IsKeyPair : std::false_type {};
+template <typename Key, typename A, typename B>
+struct IsKeyPair<Key, std::pair<A, B>>
+    : std::is_same<typename std::remove_const<A>::type, Key> {};
+
 inline constexpr uint8_t kEmpty = 0xFF;    // never used as H2
 inline constexpr uint8_t kDeleted = 0xFE;  // tombstone
 inline constexpr bool IsFull(uint8_t c) noexcept { return c < 0xFE; }
@@ -545,6 +552,8 @@ class flat_hash_map {
   using ctrl_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<uint8_t>;
   using ctrl_traits = std::allocator_traits<ctrl_alloc>;
 
+  template <typename P>
+  using is_key_pair = detail::IsKeyPair<Key, P>;
   using Group = detail::Group;
   using Mask = Group::Mask;
   static constexpr size_t kWidth = Group::kWidth;
@@ -2284,8 +2293,12 @@ class flat_hash_map {
                 !std::is_same<typename std::decay<P>::type,
                               const value_type>::value>::type>
   std::pair<iterator, bool> insert(P&& obj) {
-    value_type v(std::forward<P>(obj));
-    return insert(std::move(v));
+    if constexpr (is_key_pair<typename std::decay<P>::type>::value) {
+      return emplace(std::forward<P>(obj));  // in place, see emplace(pair)
+    } else {
+      value_type v(std::forward<P>(obj));
+      return insert(std::move(v));
+    }
   }
 
   iterator insert(const_iterator hint, const value_type& v) {
@@ -2329,6 +2342,22 @@ class flat_hash_map {
   std::pair<iterator, bool> emplace(K&& k, M&& m) {
     return insert_with(k, [&](void* p) {
       ::new (p) value_type(std::forward<K>(k), std::forward<M>(m));
+    });
+  }
+
+  // emplace(pair) with a std::pair whose first is a key_type (value_type, or
+  // std::pair<Key, T> as from a vector of pairs): builds the element in place
+  // from the pair. Through the generic emplace the key was copied twice: into
+  // the temporary, and from it, as the temporary's key is const (for a long
+  // string key, two allocations). The same safety as emplace(key, mapped).
+  template <typename P,
+            typename std::enable_if<
+                is_key_pair<typename std::decay<P>::type>::value &&
+                    std::is_constructible<value_type, P&&>::value,
+                int>::type = 0>
+  std::pair<iterator, bool> emplace(P&& pr) {
+    return insert_with(pr.first, [&](void* p) {
+      ::new (p) value_type(std::forward<P>(pr));
     });
   }
 
