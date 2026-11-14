@@ -1916,6 +1916,13 @@ class flat_hash_map {
     overflow_ = new_overflow;
     cap_ = new_cap;
     update_limit();
+    // Hint the start of the new table before the first step writes it: else
+    // its first huge page faulted in as 512 small pages and was copied by the
+    // collapse at the end (uint64 keys, no reserve, 1.2M: 58 -> 55 ns per
+    // insert, i5-3230M).
+    if constexpr (kOwnMemory) {
+      if (!at_once) manage_pages();
+    }
   }
 
   // Move one full old slot into the new table.
