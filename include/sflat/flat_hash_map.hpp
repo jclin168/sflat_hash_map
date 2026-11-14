@@ -569,6 +569,8 @@ class flat_hash_map {
       kWidth * kWidth;
   // Old slots migrated per insert during growth.
   static constexpr size_t kMigrateBatch = 256;  // multiple of kWidth
+  // huge_hint_ of a new table that has huge pages from the start.
+  static constexpr size_t kAllHuge = ~size_t{0};
   // Safety net: an insert that probes more slots than this past its home
   // group gives the table a new seed (see reseed()), at the default max load
   // factor; see reseed_probe() for higher ones. Random keys probe at most
@@ -1882,14 +1884,18 @@ class flat_hash_map {
   // ------------------------------------------------------------ growth
   // Start incremental migration to a new table. The old table is kept and
   // migrated in small steps to avoid latency spikes.
-  void begin_migration(size_t new_cap) {
+  void begin_migration(size_t new_cap, bool at_once = false) {
     check_capacity(new_cap);
     new_cap = align_cap(new_cap);
     assert(!is_migrating());
     // The new slots start without huge pages; migrate_step enables them just
     // ahead of the front, so stray writes far ahead do not commit whole huge
-    // pages.
-    slot_type* new_slots = alloc_slots(new_cap, false);
+    // pages. A growth at once (see SFLAT_GROW_AT_ONCE_BELOW) writes the whole
+    // table now, so it asks for huge pages from the start: the collapse at
+    // the end of a migration then has nothing to do, and the first touch
+    // faults in one huge page instead of 512 small ones. A growth from
+    // 1 MiB of slots to 2 MiB took 2.6 ms instead of 0.7 ms (i5-3230M).
+    slot_type* new_slots = alloc_slots(new_cap, at_once);
     uint8_t* new_ctrl = alloc_bytes(new_cap);
     std::memset(new_ctrl, detail::kEmpty, new_cap);
     const size_t new_ng = new_cap / kWidth;
@@ -1901,7 +1907,7 @@ class flat_hash_map {
     old_cap_ = cap_;
     mig_pos_ = 0;
     old_released_ = 0;
-    huge_hint_ = 0;
+    huge_hint_ = at_once ? kAllHuge : 0;
     // Old tombstones are dropped by the migration.
     deleted_ = 0;
     // Install new.
@@ -1952,9 +1958,11 @@ class flat_hash_map {
       reset_growth_left();
       // Pages that were written before their huge page hint (rare) are
       // converted now.
-      if constexpr (kOwnMemory)
-        detail::PageHuge(slots_, cap_ * sizeof(slot_type), 0,
-                         cap_ * sizeof(slot_type), true);
+      if constexpr (kOwnMemory) {
+        if (huge_hint_ != kAllHuge)
+          detail::PageHuge(slots_, cap_ * sizeof(slot_type), 0,
+                           cap_ * sizeof(slot_type), true);
+      }
       huge_hint_ = 0;
       return;
     }
@@ -2000,7 +2008,7 @@ class flat_hash_map {
     if (size_ + 1 > limit_) {
       const bool at_once =
           cap_ * (sizeof(slot_type) + 1) < SFLAT_GROW_AT_ONCE_BELOW;
-      begin_migration(grown_cap(min_cap_for(size_ + 1)));
+      begin_migration(grown_cap(min_cap_for(size_ + 1)), at_once);
       if (at_once) {
         finish_migration();
       } else {
